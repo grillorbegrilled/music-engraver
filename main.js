@@ -42,9 +42,20 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
-function showError(message) {
-  errorEl.textContent = message;
+function showError(err, contextPrefix = "") {
+  const message = err?.message || (typeof err === "string" ? err : "An unknown error occurred.");
+  const stack = err?.stack || "";
+  
+  const formattedError = contextPrefix 
+    ? `${contextPrefix}\n${message}${stack ? `\n\nStack Trace:\n${stack}` : ""}`
+    : `${message}${stack ? `\n\nStack Trace:\n${stack}` : ""}`;
+
+  errorEl.style.whiteSpace = "pre-wrap";
+  errorEl.style.fontFamily = "monospace";
+  errorEl.textContent = formattedError;
   errorEl.hidden = false;
+  
+  console.error(contextPrefix || "Error details:", err);
 }
 
 function clearError() {
@@ -99,7 +110,7 @@ async function handleFile(file) {
   } catch (err) {
     scoreIsLoaded = false;
     exportPdfBtn.disabled = true;
-    showError(err.message || "Something went wrong while engraving this file.");
+    showError(err, "Something went wrong while engraving this file:");
     setStatus("");
   }
 }
@@ -162,7 +173,7 @@ async function exportPdf() {
     pdf.save(`${loadedFileName}.pdf`);
     setStatus(`${loadedFileName}.pdf downloaded successfully.`);
   } catch (err) {
-    showError("Failed to generate vector PDF: " + (err.message || err));
+    showError(err, "Failed to generate vector PDF:");
   } finally {
     exportPdfBtn.disabled = false;
   }
@@ -211,7 +222,7 @@ const applySettingsChange = debounce(() => {
     renderAllPages(totalPages);
     setStatus(`${totalPages} page${totalPages === 1 ? "" : "s"}`);
   } catch (err) {
-    showError(err.message || "Couldn't apply that setting.");
+    showError(err, "Couldn't apply that setting:");
     setStatus("");
   }
 }, 400);
