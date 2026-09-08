@@ -130,6 +130,16 @@ async function exportPdf() {
       compress: true,
     });
 
+    // Safely resolve the svg2pdf function depending on how the UMD script attached to window
+    const svg2pdfFn =
+      typeof window.svg2pdf === "function"
+        ? window.svg2pdf
+        : window.svg2pdf?.svg2pdf || window.svg2pdf?.default;
+
+    if (typeof svg2pdfFn !== "function") {
+      throw new Error("svg2pdf library is not loaded properly.");
+    }
+
     const pageDivs = scoreArea.querySelectorAll(".page svg");
 
     for (let i = 0; i < pageDivs.length; i++) {
@@ -137,7 +147,7 @@ async function exportPdf() {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
       const svgElement = pageDivs[i];
-      await window.svg2pdf(svgElement, pdf, {
+      await svg2pdfFn(svgElement, pdf, {
         x: 0,
         y: 0,
         width: widthMm,
