@@ -115,59 +115,12 @@ async function handleFile(file) {
   }
 }
 
-// -- SVG Pre-processing for Vector PDF Export -----------------------------
-
-/**
- * Flattens inner nested <svg> elements into standard <g> nodes.
- * Converts viewBox definitions into explicit CSS transforms to prevent
- * recursion crashes in svg2pdf.js.
- */
-function flattenNestedSvg(rootSvg, widthMm, heightMm) {
-  const nestedSvgs = Array.from(rootSvg.querySelectorAll("svg"));
-
-  nestedSvgs.forEach((innerSvg) => {
-    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-
-    // Copy all attributes (classes, IDs, data attributes) from inner <svg> to <g>
-    Array.from(innerSvg.attributes).forEach((attr) => {
-      if (!["viewBox", "width", "height", "x", "y"].includes(attr.name)) {
-        group.setAttribute(attr.name, attr.value);
-      }
-    });
-
-    // Handle viewBox scaling if present
-    const viewBoxAttr = innerSvg.getAttribute("viewBox");
-    if (viewBoxAttr) {
-      const viewBox = viewBoxAttr.split(/[\s,]+/).map(Number);
-      if (viewBox.length === 4 && viewBox[2] > 0 && viewBox[3] > 0) {
-        const scaleX = widthMm / viewBox[2];
-        const scaleY = heightMm / viewBox[3];
-        const translateX = -viewBox[0];
-        const translateY = -viewBox[1];
-
-        group.setAttribute(
-          "transform",
-          `scale(${scaleX}, ${scaleY}) translate(${translateX}, ${translateY})`
-        );
-      }
-    }
-
-    // Move all children into the replacement <g> node
-    while (innerSvg.firstChild) {
-      group.appendChild(innerSvg.firstChild);
-    }
-
-    // Replace nested <svg> in parent
-    innerSvg.parentNode.replaceChild(group, innerSvg);
-  });
-}
-
-// -- PDF Export Handler ---------------------------------------------------
+// -- PDF Export Handler (Canvas Rasterization) -----------------------------
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
 
-  setStatus("Generating vector PDF…");
+  setStatus("Generating print-quality PDF…");
   exportPdfBtn.disabled = true;
 
   try {
@@ -183,6 +136,9 @@ async function exportPdf() {
     if (typeof window.jspdf?.jsPDF !== "function") {
       throw new Error("jsPDF library is not loaded.");
     }
+    if (typeof window.html2canvas !== "function") {
+      throw new Error("html2canvas library is not loaded. Ensure html2canvas script tag is present.");
+    }
 
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({
@@ -192,51 +148,32 @@ async function exportPdf() {
       compress: true,
     });
 
-    if (typeof pdf.svg !== "function") {
-      throw new Error("svg2pdf.js is not loaded or is incompatible with jsPDF.");
-    }
+    const pageElements = scoreArea.querySelectorAll(".page");
 
-    const pageSvgs = scoreArea.querySelectorAll(".page svg");
-
-    for (let i = 0; i < pageSvgs.length; i++) {
+    for (let i = 0; i < pageElements.length; i++) {
       if (i > 0) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      // Clone SVG node to manipulate without affecting live view
-      const svgClone = pageSvgs[i].cloneNode(true);
+      setStatus(`Processing page ${i + 1} of ${pageElements.length}…`);
 
-      // Verovio outputs SVGs using viewBox; ensure explicit physical dimensions exist for svg2pdf
-      svgClone.setAttribute("width", `${widthMm}mm`);
-      svgClone.setAttribute("height", `${heightMm}mm`);
+      // Scale = 3 renders at roughly 300 DPI for sharp print output
+      const canvas = await window.html2canvas(pageElements[i], {
+        scale: 3,
+        useCORS: true,
+        logging: false,
+        backgroundColor: "#ffffff",
+      });
 
-      // Flatten inner <svg> elements into <g> containers to bypass svg2pdf limitations
-      flattenNestedSvg(svgClone, widthMm, heightMm);
+      const imgData = canvas.toDataURL("image/png");
 
-      // svg2pdf needs the element attached to the DOM to resolve <use>
-      // refs, gradients, and computed styles — a detached clone fails.
-      svgClone.style.position = "fixed";
-      svgClone.style.top = "-10000px";
-      svgClone.style.left = "-10000px";
-      document.body.appendChild(svgClone);
-
-      try {
-        // Render vector SVG into PDF context
-        await pdf.svg(svgClone, {
-          x: 0,
-          y: 0,
-          width: widthMm,
-          height: heightMm,
-        });
-      } finally {
-        document.body.removeChild(svgClone);
-      }
+      pdf.addImage(imgData, "PNG", 0, 0, widthMm, heightMm, undefined, "FAST");
     }
 
     pdf.save(`${loadedFileName}.pdf`);
     setStatus(`${loadedFileName}.pdf downloaded successfully.`);
   } catch (err) {
-    showError(err, "Failed to generate vector PDF:");
+    showError(err, "Failed to generate PDF:");
   } finally {
     exportPdfBtn.disabled = false;
   }
