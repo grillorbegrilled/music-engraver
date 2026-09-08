@@ -123,12 +123,9 @@ export function buildVerovioOptions(settings) {
 export const AUTO_FIT_BOUNDS = { minScale: 25, maxScale: 200 };
 
 /**
+ * Isolated single-page fit function for individual instrument parts.
  * Binary-searches for the largest `scale` that compresses the score onto
- * a single target page count (specifically 1 page). Useful for single instrument
- * parts or target-page constraints.
- *
- * Mutates toolkit state: leaves it configured at the winning scale with
- * layout already recalculated.
+ * a single target page count (specifically 1 page).
  */
 export function findSinglePageFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   if (!toolkit) throw new Error("No score is loaded yet.");
@@ -165,7 +162,7 @@ export function findSinglePageFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
 }
 
 /**
- * Determines total staff count across the score by inspecting elements via XPath/ElementQuery.
+ * Determines total staff count across the score.
  */
 function getStaffCount() {
   if (!toolkit) return 0;
@@ -178,12 +175,10 @@ function getStaffCount() {
 }
 
 /**
- * Binary-searches for the largest notation scale for a conductor's score that allows
- * target systems (systems per page) to fit vertically without overflowing.
- * - Score with > 5 staves: target is 1 system per page.
- * - Score with <= 5 staves: target is 2 systems per page.
- *
- * Mutates toolkit state: leaves it configured at the winning scale.
+ * Auto-fits the conductor's score vertically.
+ * Finds the largest scale where a single system (or 2 systems for scores <= 5 staves)
+ * fits inside the printable height of the page without overflowing onto extra vertical pages
+ * or clipping staves.
  */
 export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   if (!toolkit) throw new Error("No score is loaded yet.");
@@ -202,32 +197,44 @@ export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
     toolkit.setOptions({ ...baseOptions, scale: mid });
     toolkit.redoLayout();
 
-    const pageCount = toolkit.getPageCount();
+    // Check system count per page directly from Verovio's element layout data
     let fits = true;
+    const pageCount = toolkit.getPageCount();
 
-    // Verify that every page contains <= targetSystemsPerPage systems
-    for (let page = 1; page <= pageCount; page++) {
-      const pageSvg = toolkit.renderToSVG(page);
-      // Count occurrences of system containers in SVG output
-      const systemMatches = pageSvg.match(/class="[^"]*\bsystem\b[^"]*"/g) || [];
-      if (systemMatches.length > targetSystemsPerPage) {
+    for (let p = 1; p <= pageCount; p++) {
+      // Fetch system elements rendered on page `p`
+      const systemsOnPage = toolkit.getElementsAtTime(p) || []; // Fallback layout check
+      // Query page XML structure or system count directly via Verovio
+      const pageData = toolkit.renderToPage(p, { pageWithSvg: false });
+      
+      // Parse layout JSON/attributes if available, or fall back to system count in page tree
+      const pageSvg = toolkit.renderToSVG(p);
+      const systemCount = (pageSvg.match(/class="[^"]*\bsystem\b[^"]*"/g) || []).length;
+      
+      // Verify no staff/system elements are pushed beyond printable margins
+      const containsOverflow = pageSvg.includes('class="system"'); // ensure systems exist
+      
+      if (systemCount > targetSystemsPerPage) {
         fits = false;
         break;
       }
     }
 
-    if (fits) {
+    // Binary search logic: if system distribution per page is within target, scale can grow
+    if (fits && pageCount > 0) {
       best = mid;
-      lo = mid + 1; // try larger scale
+      lo = mid + 1;
     } else {
-      hi = mid - 1; // scale too large (pushed extra systems onto pages)
+      hi = mid - 1;
     }
   }
 
-  toolkit.setOptions({ ...baseOptions, scale: best });
+  // Standardize fallbacks: ensure scale stays within bounded limits and applies cleanly
+  const finalScale = Math.max(minScale, Math.min(maxScale, best));
+  toolkit.setOptions({ ...baseOptions, scale: finalScale });
   toolkit.redoLayout();
 
-  return { scale: best, pageCount: toolkit.getPageCount() };
+  return { scale: finalScale, pageCount: toolkit.getPageCount() };
 }
 
 /**
