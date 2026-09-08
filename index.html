@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Engraving Spike — MusicXML → SVG</title>
+<link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+
+  <header class="chrome">
+    <h1 class="wordmark">Engraving Spike</h1>
+    <p class="meta">Stage 1 — load a score, render it with Verovio.</p>
+  </header>
+
+  <div class="toolbar">
+    <label class="open-button" for="file-input">
+      Open score
+      <input id="file-input" type="file" accept=".xml,.musicxml,.mxl" hidden />
+    </label>
+
+    <details class="settings">
+      <summary>Settings</summary>
+      <div class="settings-grid">
+        <label>
+          Page size
+          <select id="page-size">
+            <option value="letter">Letter</option>
+            <option value="a4" selected>A4</option>
+            <option value="legal">Legal</option>
+          </select>
+        </label>
+
+        <label>
+          Orientation
+          <select id="orientation">
+            <option value="portrait" selected>Portrait</option>
+            <option value="landscape">Landscape</option>
+          </select>
+        </label>
+
+        <label>
+          Notation size
+          <span class="range-row">
+            <input id="scale" type="range" min="50" max="150" step="5" value="100" />
+            <output id="scale-value" for="scale">100%</output>
+          </span>
+        </label>
+
+        <fieldset class="margins">
+          <legend>Margins (mm)</legend>
+          <label>Top <input id="margin-top" type="number" min="0" max="50" step="1" value="10" /></label>
+          <label>Bottom <input id="margin-bottom" type="number" min="0" max="50" step="1" value="10" /></label>
+          <label>Left <input id="margin-left" type="number" min="0" max="50" step="1" value="10" /></label>
+          <label>Right <input id="margin-right" type="number" min="0" max="50" step="1" value="10" /></label>
+        </fieldset>
+      </div>
+    </details>
+  </div>
+
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+  <p id="error" class="error" role="alert" hidden></p>
+
+  <main id="score-area" class="score-area">
+    <p class="empty-hint">
+      Open a MusicXML file (.xml or .musicxml) to engrave it here.
+      You can also drag a file onto this area.
+    </p>
+  </main>
+
+  <script type="module" src="src/app/main.js"></script>
+</body>
+</html>
