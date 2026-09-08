@@ -122,6 +122,10 @@ async function exportPdf() {
       [widthMm, heightMm] = [heightMm, widthMm];
     }
 
+    if (typeof window.jspdf?.jsPDF !== "function") {
+      throw new Error("jsPDF library is not loaded.");
+    }
+
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({
       orientation: settings.orientation,
@@ -130,27 +134,24 @@ async function exportPdf() {
       compress: true,
     });
 
-    // Resolve svg2pdf function cleanly across UMD export patterns
-    const svg2pdfFn =
-      typeof window.svg2pdf === "function"
-        ? window.svg2pdf
-        : window.svg2pdf?.svg2pdf || window.svg2pdf?.default;
-
-    if (typeof svg2pdfFn !== "function") {
-      throw new Error("svg2pdf library is not loaded properly.");
+    // svg2pdf.js integrates with jsPDF through pdf.svg(). Using the
+    // integration API avoids depending on the particular UMD export shape
+    // exposed by the version of svg2pdf.js loaded by the page.
+    if (typeof pdf.svg !== "function") {
+      throw new Error("svg2pdf.js is not loaded or is incompatible with jsPDF.");
     }
 
-    const pageDivs = scoreArea.querySelectorAll(".page svg");
+    const pageSvgs = scoreArea.querySelectorAll(".page svg");
 
-    for (let i = 0; i < pageDivs.length; i++) {
+    for (let i = 0; i < pageSvgs.length; i++) {
       if (i > 0) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      const svgElement = pageDivs[i];
+      const svgElement = pageSvgs[i];
 
-      // Pass DOM element directly as the first argument
-      await svg2pdfFn(svgElement, pdf, {
+      // Pass the SVG DOM element to jsPDF's svg() integration.
+      await pdf.svg(svgElement, {
         x: 0,
         y: 0,
         width: widthMm,
@@ -179,9 +180,11 @@ scoreArea.addEventListener("dragover", (event) => {
   event.preventDefault();
   scoreArea.classList.add("drag-over");
 });
+
 scoreArea.addEventListener("dragleave", () => {
   scoreArea.classList.remove("drag-over");
 });
+
 scoreArea.addEventListener("drop", (event) => {
   event.preventDefault();
   scoreArea.classList.remove("drag-over");
