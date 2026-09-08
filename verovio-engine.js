@@ -123,17 +123,17 @@ export function buildVerovioOptions(settings) {
 export const AUTO_FIT_BOUNDS = { minScale: 25, maxScale: 200 };
 
 /**
- * Binary-searches for the largest `scale` that doesn't push the score's
- * page count above what's achievable at `minScale`. Requires a score to
- * already be loaded (loadScore must run first).
+ * Binary-searches for the largest `scale` that compresses the score onto
+ * a single target page count (specifically 1 page). Useful for single instrument
+ * parts or target-page constraints.
  *
  * Mutates toolkit state: leaves it configured at the winning scale with
- * layout already recalculated, so the caller can render right after.
+ * layout already recalculated.
  */
-export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
+export function findSinglePageFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   if (!toolkit) throw new Error("No score is loaded yet.");
   const { minScale, maxScale } = bounds;
-  const baseOptions = buildVerovioOptions(settings); // includes scaleToPageSize: true
+  const baseOptions = buildVerovioOptions(settings);
 
   toolkit.setOptions({ ...baseOptions, scale: minScale });
   toolkit.redoLayout();
@@ -162,6 +162,72 @@ export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   toolkit.redoLayout();
 
   return { scale: best, pageCount: minPageCount };
+}
+
+/**
+ * Determines total staff count across the score by inspecting elements via XPath/ElementQuery.
+ */
+function getStaffCount() {
+  if (!toolkit) return 0;
+  try {
+    const elements = toolkit.getElementAttr("//staffDef");
+    return Array.isArray(elements) ? elements.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Binary-searches for the largest notation scale for a conductor's score that allows
+ * target systems (systems per page) to fit vertically without overflowing.
+ * - Score with > 5 staves: target is 1 system per page.
+ * - Score with <= 5 staves: target is 2 systems per page.
+ *
+ * Mutates toolkit state: leaves it configured at the winning scale.
+ */
+export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
+  if (!toolkit) throw new Error("No score is loaded yet.");
+  const { minScale, maxScale } = bounds;
+  const baseOptions = buildVerovioOptions(settings);
+
+  const staffCount = getStaffCount();
+  const targetSystemsPerPage = staffCount > 0 && staffCount <= 5 ? 2 : 1;
+
+  let lo = minScale;
+  let hi = maxScale;
+  let best = minScale;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    toolkit.setOptions({ ...baseOptions, scale: mid });
+    toolkit.redoLayout();
+
+    const pageCount = toolkit.getPageCount();
+    let fits = true;
+
+    // Verify that every page contains <= targetSystemsPerPage systems
+    for (let page = 1; page <= pageCount; page++) {
+      const pageSvg = toolkit.renderToSVG(page);
+      // Count occurrences of system containers in SVG output
+      const systemMatches = pageSvg.match(/class="[^"]*\bsystem\b[^"]*"/g) || [];
+      if (systemMatches.length > targetSystemsPerPage) {
+        fits = false;
+        break;
+      }
+    }
+
+    if (fits) {
+      best = mid;
+      lo = mid + 1; // try larger scale
+    } else {
+      hi = mid - 1; // scale too large (pushed extra systems onto pages)
+    }
+  }
+
+  toolkit.setOptions({ ...baseOptions, scale: best });
+  toolkit.redoLayout();
+
+  return { scale: best, pageCount: toolkit.getPageCount() };
 }
 
 /**
