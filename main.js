@@ -115,12 +115,18 @@ async function handleFile(file) {
   }
 }
 
-// -- PDF Export Handler (Canvas Rasterization) -----------------------------
+// -- Memory Helper --------------------------------------------------------
+
+function yieldToMainThread() {
+  return new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+// -- PDF Export Handler (Memory-Managed Rasterization) --------------------
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
 
-  setStatus("Generating print-quality PDF…");
+  setStatus("Generating PDF…");
   exportPdfBtn.disabled = true;
 
   try {
@@ -137,7 +143,7 @@ async function exportPdf() {
       throw new Error("jsPDF library is not loaded.");
     }
     if (typeof window.html2canvas !== "function") {
-      throw new Error("html2canvas library is not loaded. Ensure html2canvas script tag is present.");
+      throw new Error("html2canvas library is not loaded.");
     }
 
     const { jsPDF } = window.jspdf;
@@ -155,20 +161,33 @@ async function exportPdf() {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      setStatus(`Processing page ${i + 1} of ${pageElements.length}…`);
+      setStatus(`Rendering page ${i + 1} of ${pageElements.length}…`);
 
-      // Scale = 3 renders at roughly 300 DPI for sharp print output
+      // Yield thread so UI updates status text before heavy canvas operation
+      await yieldToMainThread();
+
+      // scale: 2 produces sharp ~200 DPI prints without exhausting VRAM
       const canvas = await window.html2canvas(pageElements[i], {
-        scale: 3,
+        scale: 2,
         useCORS: true,
         logging: false,
         backgroundColor: "#ffffff",
       });
 
-      const imgData = canvas.toDataURL("image/png");
+      const imgData = canvas.toDataURL("image/jpeg", 0.92);
 
-      pdf.addImage(imgData, "PNG", 0, 0, widthMm, heightMm, undefined, "FAST");
+      pdf.addImage(imgData, "JPEG", 0, 0, widthMm, heightMm, undefined, "FAST");
+
+      // Force-clear canvas context to free memory immediately
+      canvas.width = 0;
+      canvas.height = 0;
+
+      // Yield thread to allow garbage collection between pages
+      await yieldToMainThread();
     }
+
+    setStatus("Saving PDF file…");
+    await yieldToMainThread();
 
     pdf.save(`${loadedFileName}.pdf`);
     setStatus(`${loadedFileName}.pdf downloaded successfully.`);
@@ -214,7 +233,7 @@ function debounce(fn, delayMs) {
 }
 
 const applySettingsChange = debounce(() => {
-  if (!scoreIsLoaded) return; // nothing to re-render yet; new settings apply on next open
+  if (!scoreIsLoaded) return;
   clearError();
   setStatus("Re-engraving…");
   try {
