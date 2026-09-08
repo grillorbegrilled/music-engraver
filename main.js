@@ -130,7 +130,7 @@ async function exportPdf() {
       compress: true,
     });
 
-    // Safely resolve the svg2pdf function depending on how the UMD script attached to window
+    // Resolve svg2pdf function cleanly across UMD export patterns
     const svg2pdfFn =
       typeof window.svg2pdf === "function"
         ? window.svg2pdf
@@ -146,7 +146,10 @@ async function exportPdf() {
       if (i > 0) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
+
       const svgElement = pageDivs[i];
+
+      // Pass DOM element directly as the first argument
       await svg2pdfFn(svgElement, pdf, {
         x: 0,
         y: 0,
