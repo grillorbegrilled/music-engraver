@@ -109,6 +109,8 @@ export function buildVerovioOptions(settings) {
     scale: Math.round(settings.notationScalePercent),
     breaks: "auto",
     adjustPageHeight: false,
+    header: "none",
+    footer: "none",
   };
 }
 
