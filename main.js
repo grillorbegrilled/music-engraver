@@ -121,31 +121,68 @@ function yieldToMainThread() {
   return new Promise((resolve) => setTimeout(resolve, 30));
 }
 
-function renderSvgToCanvas(svgString, canvas, widthPx, heightPx) {
+/**
+ * Creates a fully standalone, valid SVG string with explicit dimensions and namespace
+ */
+function prepareStandaloneSvgString(svgElement, targetWidthPx, targetHeightPx) {
+  const clone = svgElement.cloneNode(true);
+
+  // Ensure standard SVG XML namespace attributes exist
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+
+  // Get current width/height or viewBox
+  const viewBox = clone.getAttribute("viewBox");
+  let nativeWidth = parseFloat(clone.getAttribute("width"));
+  let nativeHeight = parseFloat(clone.getAttribute("height"));
+
+  if ((!nativeWidth || !nativeHeight) && viewBox) {
+    const parts = viewBox.split(/\s+/).map(Number);
+    if (parts.length === 4) {
+      nativeWidth = parts[2];
+      nativeHeight = parts[3];
+    }
+  }
+
+  // Explicitly set absolute pixel dimensions on the SVG element
+  clone.setAttribute("width", `${targetWidthPx}px`);
+  clone.setAttribute("height", `${targetHeightPx}px`);
+  
+  if (!clone.getAttribute("viewBox") && nativeWidth && nativeHeight) {
+    clone.setAttribute("viewBox", `0 0 ${nativeWidth} ${nativeHeight}`);
+  }
+
+  return new XMLSerializer().serializeToString(clone);
+}
+
+function renderSvgToCanvas(svgElement, canvas, widthPx, heightPx) {
   return new Promise((resolve, reject) => {
     const ctx = canvas.getContext("2d");
-    const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
+    const svgString = prepareStandaloneSvgString(svgElement, widthPx, heightPx);
+    
+    // Encode as Base64 Data URI to prevent cross-origin and font resolution issues
+    const encodedSvg = unescape(encodeURIComponent(svgString));
+    const dataUrl = "data:image/svg+xml;base64," + btoa(encodedSvg);
+
     const img = new Image();
 
     img.onload = () => {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, widthPx, heightPx);
       ctx.drawImage(img, 0, 0, widthPx, heightPx);
-      URL.revokeObjectURL(url);
       resolve();
     };
 
     img.onerror = (e) => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Failed to render SVG page onto canvas image buffer."));
+      console.error("SVG Render Error:", e);
+      reject(new Error("Failed to render standalone SVG onto canvas buffer."));
     };
 
-    img.src = url;
+    img.src = dataUrl;
   });
 }
 
-// -- PDF Export Handler (Native SVG Blob Rasterization) -------------------
+// -- PDF Export Handler ---------------------------------------------------
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
@@ -153,7 +190,6 @@ async function exportPdf() {
   setStatus("Generating PDF…");
   exportPdfBtn.disabled = true;
 
-  // Single shared canvas used across all pages to keep VRAM usage strictly flat
   const sharedCanvas = document.createElement("canvas");
 
   try {
@@ -170,8 +206,8 @@ async function exportPdf() {
       throw new Error("jsPDF library is not loaded.");
     }
 
-    // Set high-resolution target buffer dimensions (200 DPI resolution)
-    const scaleFactor = 2; // 2x resolution (~200 DPI)
+    // Set resolution (2x resolution ~200 DPI)
+    const scaleFactor = 2;
     const canvasWidthPx = Math.round((widthMm * 96) / 25.4) * scaleFactor;
     const canvasHeightPx = Math.round((heightMm * 96) / 25.4) * scaleFactor;
 
@@ -186,25 +222,27 @@ async function exportPdf() {
       compress: true,
     });
 
-    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber++) {
-      if (pageNumber > 1) {
+    const pageSvgElements = scoreArea.querySelectorAll(".page svg");
+    
+    if (pageSvgElements.length === 0) {
+      throw new Error("No SVG pages found in the score display area.");
+    }
+
+    for (let i = 0; i < pageSvgElements.length; i++) {
+      const pageNumber = i + 1;
+
+      if (i > 0) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      setStatus(`Processing page ${pageNumber} of ${totalPages}…`);
+      setStatus(`Processing page ${pageNumber} of ${pageSvgElements.length}…`);
       await yieldToMainThread();
 
-      // Retrieve raw SVG string directly from verovio engine or DOM
-      const pageSvgElement = scoreArea.querySelectorAll(".page svg")[pageNumber - 1];
-      if (!pageSvgElement) throw new Error(`Missing rendered SVG for page ${pageNumber}`);
+      const svgElement = pageSvgElements[i];
 
-      const svgString = new XMLSerializer().serializeToString(pageSvgElement);
+      await renderSvgToCanvas(svgElement, sharedCanvas, canvasWidthPx, canvasHeightPx);
 
-      // Paint SVG directly to shared canvas context
-      await renderSvgToCanvas(svgString, sharedCanvas, canvasWidthPx, canvasHeightPx);
-
-      // Encode image buffer into PDF
-      const imgData = sharedCanvas.toDataURL("image/jpeg", 0.90);
+      const imgData = sharedCanvas.toDataURL("image/jpeg", 0.92);
       pdf.addImage(imgData, "JPEG", 0, 0, widthMm, heightMm, undefined, "FAST");
 
       await yieldToMainThread();
@@ -218,7 +256,6 @@ async function exportPdf() {
   } catch (err) {
     showError(err, "Failed to generate PDF:");
   } finally {
-    // Release shared canvas allocation
     sharedCanvas.width = 0;
     sharedCanvas.height = 0;
     exportPdfBtn.disabled = false;
