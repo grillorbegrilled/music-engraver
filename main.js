@@ -182,7 +182,7 @@ function renderSvgToCanvas(svgElement, canvas, widthPx, heightPx) {
   });
 }
 
-// -- PDF Export Handler ---------------------------------------------------
+// -- PDF Export Handler (Fixed 1:1 Page Mapping) --------------------------
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
@@ -206,6 +206,19 @@ async function exportPdf() {
       throw new Error("jsPDF library is not loaded.");
     }
 
+    // Target ONLY direct page containers to avoid capturing hidden defs/font SVGs
+    const pageContainers = scoreArea.querySelectorAll(".page");
+    const validSvgElements = [];
+
+    pageContainers.forEach((pageEl) => {
+      const svg = pageEl.querySelector("svg");
+      if (svg) validSvgElements.push(svg);
+    });
+
+    if (validSvgElements.length === 0) {
+      throw new Error("No rendered score pages found.");
+    }
+
     // Set resolution (2x resolution ~200 DPI)
     const scaleFactor = 2;
     const canvasWidthPx = Math.round((widthMm * 96) / 25.4) * scaleFactor;
@@ -215,6 +228,8 @@ async function exportPdf() {
     sharedCanvas.height = canvasHeightPx;
 
     const { jsPDF } = window.jspdf;
+    
+    // Initialize jsPDF — starts with 1 blank page automatically
     const pdf = new jsPDF({
       orientation: settings.orientation,
       unit: "mm",
@@ -222,27 +237,26 @@ async function exportPdf() {
       compress: true,
     });
 
-    const pageSvgElements = scoreArea.querySelectorAll(".page svg");
-    
-    if (pageSvgElements.length === 0) {
-      throw new Error("No SVG pages found in the score display area.");
-    }
+    for (let i = 0; i < validSvgElements.length; i++) {
+      const pageIndex = i + 1;
 
-    for (let i = 0; i < pageSvgElements.length; i++) {
-      const pageNumber = i + 1;
-
+      // Add a new page ONLY after page 1
       if (i > 0) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      setStatus(`Processing page ${pageNumber} of ${pageSvgElements.length}…`);
+      setStatus(`Processing page ${pageIndex} of ${validSvgElements.length}…`);
       await yieldToMainThread();
 
-      const svgElement = pageSvgElements[i];
+      const svgElement = validSvgElements[i];
 
+      // Paint SVG onto shared canvas
       await renderSvgToCanvas(svgElement, sharedCanvas, canvasWidthPx, canvasHeightPx);
 
       const imgData = sharedCanvas.toDataURL("image/jpeg", 0.92);
+
+      // Explicitly set focus to current page index before adding image
+      pdf.setPage(pageIndex);
       pdf.addImage(imgData, "JPEG", 0, 0, widthMm, heightMm, undefined, "FAST");
 
       await yieldToMainThread();
@@ -261,7 +275,6 @@ async function exportPdf() {
     exportPdfBtn.disabled = false;
   }
 }
-
 exportPdfBtn.addEventListener("click", exportPdf);
 
 fileInput.addEventListener("change", () => {
