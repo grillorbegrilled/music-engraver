@@ -3,21 +3,30 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Engraving Spike — MusicXML → SVG</title>
+<title>Engraving Spike — MusicXML → SVG & PDF</title>
 <link rel="stylesheet" href="assets/styles.css" />
+<!-- Client-side Vector PDF Generation Dependencies -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.3/dist/svg2pdf.umd.min.js"></script>
 </head>
 <body>
 
   <header class="chrome">
     <h1 class="wordmark">Engraving Spike</h1>
-    <p class="meta">Stage 1 — load a score, render it with Verovio.</p>
+    <p class="meta">Stage 1 — load a score, render SVG, and export vector PDF.</p>
   </header>
 
   <div class="toolbar">
-    <label class="open-button" for="file-input">
-      Open score
-      <input id="file-input" type="file" accept=".xml,.musicxml,.mxl" hidden />
-    </label>
+    <div class="button-group">
+      <label class="open-button" for="file-input">
+        Open score
+        <input id="file-input" type="file" accept=".xml,.musicxml" hidden />
+      </label>
+
+      <button id="export-pdf-btn" class="open-button" disabled>
+        Export PDF
+      </button>
+    </div>
 
     <details class="settings">
       <summary>Settings</summary>
