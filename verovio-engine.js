@@ -107,12 +107,61 @@ export function buildVerovioOptions(settings) {
     pageMarginLeft: Math.round(settings.marginLeftMm * MM_TO_VRV_UNIT),
     pageMarginRight: Math.round(settings.marginRightMm * MM_TO_VRV_UNIT),
     scale: Math.round(settings.notationScalePercent),
+    scaleToPageSize: true,     // scale now actually changes fit, not just post-layout resize
+    justifyVertically: true,   // spreads systems to fill page height instead of leaving dead space
+    spacingLinear: settings.spacingLinear ?? 0.2,        // was implicit default 0.25
+    spacingNonLinear: settings.spacingNonLinear ?? 0.45, // was implicit default 0.6
     breaks: "auto",
     adjustPageHeight: false,
     mmOutput: true,
     header: "none",
     footer: "none",
   };
+}
+
+/** Bounds for the auto-fit scale search. Manual slider should match these. */
+export const AUTO_FIT_BOUNDS = { minScale: 25, maxScale: 200 };
+
+/**
+ * Binary-searches for the largest `scale` that doesn't push the score's
+ * page count above what's achievable at `minScale`. Requires a score to
+ * already be loaded (loadScore must run first).
+ *
+ * Mutates toolkit state: leaves it configured at the winning scale with
+ * layout already recalculated, so the caller can render right after.
+ */
+export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
+  if (!toolkit) throw new Error("No score is loaded yet.");
+  const { minScale, maxScale } = bounds;
+  const baseOptions = buildVerovioOptions(settings); // includes scaleToPageSize: true
+
+  toolkit.setOptions({ ...baseOptions, scale: minScale });
+  toolkit.redoLayout();
+  const minPageCount = toolkit.getPageCount();
+
+  let lo = minScale;
+  let hi = maxScale;
+  let best = minScale;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    toolkit.setOptions({ ...baseOptions, scale: mid });
+    toolkit.redoLayout();
+    const pageCount = toolkit.getPageCount();
+
+    if (pageCount <= minPageCount) {
+      best = mid;
+      lo = mid + 1; // try bigger
+    } else {
+      hi = mid - 1; // too big, shrink
+    }
+  }
+
+  // Leave toolkit in the winning, already-laid-out state.
+  toolkit.setOptions({ ...baseOptions, scale: best });
+  toolkit.redoLayout();
+
+  return { scale: best, pageCount: minPageCount };
 }
 
 /**

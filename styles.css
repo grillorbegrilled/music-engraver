@@ -158,6 +158,11 @@ details.settings summary {
   min-width: 3.5ch;
 }
 
+input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 fieldset.margins {
   display: flex;
   flex-wrap: wrap;

@@ -1,5 +1,5 @@
 // main.js
-import { loadScore, updateSettings, renderPage, PAGE_SIZES_MM } from "./verovio-engine.js";
+import { loadScore, updateSettings, renderPage, PAGE_SIZES_MM, findAutoFitScale } from "./verovio-engine.js";
 
 // -- element references ----------------------------------------------------
 
@@ -13,6 +13,7 @@ const pageSizeEl = document.getElementById("page-size");
 const orientationEl = document.getElementById("orientation");
 const scaleEl = document.getElementById("scale");
 const scaleValueEl = document.getElementById("scale-value");
+const autoFitEl = document.getElementById("auto-fit");
 const marginTopEl = document.getElementById("margin-top");
 const marginBottomEl = document.getElementById("margin-bottom");
 const marginLeftEl = document.getElementById("margin-left");
@@ -34,6 +35,17 @@ function currentSettings() {
     marginLeftMm: Number(marginLeftEl.value),
     marginRightMm: Number(marginRightEl.value),
   };
+}
+
+// Resolves scale to use: auto-fit result, or manual slider value.
+// Score must already be loaded (findAutoFitScale requires it).
+async function resolveScale(settings) {
+  if (!autoFitEl.checked) return settings.notationScalePercent;
+  setStatus("Fitting to page…");
+  const { scale } = findAutoFitScale(settings);
+  scaleEl.value = String(scale);
+  scaleValueEl.textContent = `${scale}%`;
+  return scale;
 }
 
 // -- status / error helpers ---------------------------------------------
@@ -101,7 +113,9 @@ async function handleFile(file) {
   setStatus(`Engraving “${file.name}”…`);
   try {
     const text = await readFileAsText(file);
-    totalPages = await loadScore(text, currentSettings());
+    totalPages = await loadScore(text, currentSettings()); // initial load, base scale
+    const settings = { ...currentSettings(), notationScalePercent: await resolveScale(currentSettings()) };
+    totalPages = updateSettings(settings); // re-apply with resolved scale
     renderAllPages(totalPages);
     scoreIsLoaded = true;
     loadedFileName = file.name.replace(/\.[^/.]+$/, "");
@@ -309,12 +323,13 @@ function debounce(fn, delayMs) {
   };
 }
 
-const applySettingsChange = debounce(() => {
+const applySettingsChange = debounce(async () => {
   if (!scoreIsLoaded) return;
   clearError();
   setStatus("Re-engraving…");
   try {
-    totalPages = updateSettings(currentSettings());
+    const settings = { ...currentSettings(), notationScalePercent: await resolveScale(currentSettings()) };
+    totalPages = updateSettings(settings);
     renderAllPages(totalPages);
     setStatus(`${totalPages} page${totalPages === 1 ? "" : "s"}`);
   } catch (err) {
@@ -329,5 +344,10 @@ const applySettingsChange = debounce(() => {
 
 scaleEl.addEventListener("input", () => {
   scaleValueEl.textContent = `${scaleEl.value}%`;
+  applySettingsChange();
+});
+
+autoFitEl.addEventListener("change", () => {
+  scaleEl.disabled = autoFitEl.checked;
   applySettingsChange();
 });
