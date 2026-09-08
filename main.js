@@ -115,19 +115,46 @@ async function handleFile(file) {
   }
 }
 
-// -- Memory Helper --------------------------------------------------------
+// -- Memory & Async Helpers -----------------------------------------------
 
 function yieldToMainThread() {
-  return new Promise((resolve) => setTimeout(resolve, 50));
+  return new Promise((resolve) => setTimeout(resolve, 30));
 }
 
-// -- PDF Export Handler (Memory-Managed Rasterization) --------------------
+function renderSvgToCanvas(svgString, canvas, widthPx, heightPx) {
+  return new Promise((resolve, reject) => {
+    const ctx = canvas.getContext("2d");
+    const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+
+    img.onload = () => {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, widthPx, heightPx);
+      ctx.drawImage(img, 0, 0, widthPx, heightPx);
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to render SVG page onto canvas image buffer."));
+    };
+
+    img.src = url;
+  });
+}
+
+// -- PDF Export Handler (Native SVG Blob Rasterization) -------------------
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
 
   setStatus("Generating PDF…");
   exportPdfBtn.disabled = true;
+
+  // Single shared canvas used across all pages to keep VRAM usage strictly flat
+  const sharedCanvas = document.createElement("canvas");
 
   try {
     const settings = currentSettings();
@@ -142,9 +169,14 @@ async function exportPdf() {
     if (typeof window.jspdf?.jsPDF !== "function") {
       throw new Error("jsPDF library is not loaded.");
     }
-    if (typeof window.html2canvas !== "function") {
-      throw new Error("html2canvas library is not loaded.");
-    }
+
+    // Set high-resolution target buffer dimensions (200 DPI resolution)
+    const scaleFactor = 2; // 2x resolution (~200 DPI)
+    const canvasWidthPx = Math.round((widthMm * 96) / 25.4) * scaleFactor;
+    const canvasHeightPx = Math.round((heightMm * 96) / 25.4) * scaleFactor;
+
+    sharedCanvas.width = canvasWidthPx;
+    sharedCanvas.height = canvasHeightPx;
 
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({
@@ -154,35 +186,27 @@ async function exportPdf() {
       compress: true,
     });
 
-    const pageElements = scoreArea.querySelectorAll(".page");
-
-    for (let i = 0; i < pageElements.length; i++) {
-      if (i > 0) {
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber++) {
+      if (pageNumber > 1) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      setStatus(`Rendering page ${i + 1} of ${pageElements.length}…`);
-
-      // Yield thread so UI updates status text before heavy canvas operation
+      setStatus(`Processing page ${pageNumber} of ${totalPages}…`);
       await yieldToMainThread();
 
-      // scale: 2 produces sharp ~200 DPI prints without exhausting VRAM
-      const canvas = await window.html2canvas(pageElements[i], {
-        scale: 2,
-        useCORS: true,
-        logging: false,
-        backgroundColor: "#ffffff",
-      });
+      // Retrieve raw SVG string directly from verovio engine or DOM
+      const pageSvgElement = scoreArea.querySelectorAll(".page svg")[pageNumber - 1];
+      if (!pageSvgElement) throw new Error(`Missing rendered SVG for page ${pageNumber}`);
 
-      const imgData = canvas.toDataURL("image/jpeg", 0.92);
+      const svgString = new XMLSerializer().serializeToString(pageSvgElement);
 
+      // Paint SVG directly to shared canvas context
+      await renderSvgToCanvas(svgString, sharedCanvas, canvasWidthPx, canvasHeightPx);
+
+      // Encode image buffer into PDF
+      const imgData = sharedCanvas.toDataURL("image/jpeg", 0.90);
       pdf.addImage(imgData, "JPEG", 0, 0, widthMm, heightMm, undefined, "FAST");
 
-      // Force-clear canvas context to free memory immediately
-      canvas.width = 0;
-      canvas.height = 0;
-
-      // Yield thread to allow garbage collection between pages
       await yieldToMainThread();
     }
 
@@ -194,6 +218,9 @@ async function exportPdf() {
   } catch (err) {
     showError(err, "Failed to generate PDF:");
   } finally {
+    // Release shared canvas allocation
+    sharedCanvas.width = 0;
+    sharedCanvas.height = 0;
     exportPdfBtn.disabled = false;
   }
 }
