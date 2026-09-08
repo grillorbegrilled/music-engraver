@@ -115,6 +115,53 @@ async function handleFile(file) {
   }
 }
 
+// -- SVG Pre-processing for Vector PDF Export -----------------------------
+
+/**
+ * Flattens inner nested <svg> elements into standard <g> nodes.
+ * Converts viewBox definitions into explicit CSS transforms to prevent
+ * recursion crashes in svg2pdf.js.
+ */
+function flattenNestedSvg(rootSvg, widthMm, heightMm) {
+  const nestedSvgs = Array.from(rootSvg.querySelectorAll("svg"));
+
+  nestedSvgs.forEach((innerSvg) => {
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
+    // Copy all attributes (classes, IDs, data attributes) from inner <svg> to <g>
+    Array.from(innerSvg.attributes).forEach((attr) => {
+      if (!["viewBox", "width", "height", "x", "y"].includes(attr.name)) {
+        group.setAttribute(attr.name, attr.value);
+      }
+    });
+
+    // Handle viewBox scaling if present
+    const viewBoxAttr = innerSvg.getAttribute("viewBox");
+    if (viewBoxAttr) {
+      const viewBox = viewBoxAttr.split(/[\s,]+/).map(Number);
+      if (viewBox.length === 4 && viewBox[2] > 0 && viewBox[3] > 0) {
+        const scaleX = widthMm / viewBox[2];
+        const scaleY = heightMm / viewBox[3];
+        const translateX = -viewBox[0];
+        const translateY = -viewBox[1];
+
+        group.setAttribute(
+          "transform",
+          `scale(${scaleX}, ${scaleY}) translate(${translateX}, ${translateY})`
+        );
+      }
+    }
+
+    // Move all children into the replacement <g> node
+    while (innerSvg.firstChild) {
+      group.appendChild(innerSvg.firstChild);
+    }
+
+    // Replace nested <svg> in parent
+    innerSvg.parentNode.replaceChild(group, innerSvg);
+  });
+}
+
 // -- PDF Export Handler ---------------------------------------------------
 
 async function exportPdf() {
@@ -160,12 +207,11 @@ async function exportPdf() {
       const svgClone = pageSvgs[i].cloneNode(true);
 
       // Verovio outputs SVGs using viewBox; ensure explicit physical dimensions exist for svg2pdf
-      if (!svgClone.getAttribute("width")) {
-        svgClone.setAttribute("width", `${widthMm}mm`);
-      }
-      if (!svgClone.getAttribute("height")) {
-        svgClone.setAttribute("height", `${heightMm}mm`);
-      }
+      svgClone.setAttribute("width", `${widthMm}mm`);
+      svgClone.setAttribute("height", `${heightMm}mm`);
+
+      // Flatten inner <svg> elements into <g> containers to bypass svg2pdf limitations
+      flattenNestedSvg(svgClone, widthMm, heightMm);
 
       // svg2pdf needs the element attached to the DOM to resolve <use>
       // refs, gradients, and computed styles — a detached clone fails.
