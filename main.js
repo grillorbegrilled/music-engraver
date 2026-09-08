@@ -145,9 +145,6 @@ async function exportPdf() {
       compress: true,
     });
 
-    // svg2pdf.js integrates with jsPDF through pdf.svg(). Using the
-    // integration API avoids depending on the particular UMD export shape
-    // exposed by the version of svg2pdf.js loaded by the page.
     if (typeof pdf.svg !== "function") {
       throw new Error("svg2pdf.js is not loaded or is incompatible with jsPDF.");
     }
@@ -159,10 +156,19 @@ async function exportPdf() {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
 
-      const svgElement = pageSvgs[i];
+      // Clone SVG node to manipulate without affecting live view
+      const svgClone = pageSvgs[i].cloneNode(true);
 
-      // Pass the SVG DOM element to jsPDF's svg() integration.
-      await pdf.svg(svgElement, {
+      // Verovio outputs SVGs using viewBox; ensure explicit physical dimensions exist for svg2pdf
+      if (!svgClone.getAttribute("width")) {
+        svgClone.setAttribute("width", `${widthMm}mm`);
+      }
+      if (!svgClone.getAttribute("height")) {
+        svgClone.setAttribute("height", `${heightMm}mm`);
+      }
+
+      // Render vector SVG into PDF context
+      await pdf.svg(svgClone, {
         x: 0,
         y: 0,
         width: widthMm,
