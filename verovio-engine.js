@@ -107,10 +107,21 @@ export function buildVerovioOptions(settings) {
     pageMarginLeft: Math.round(settings.marginLeftMm * MM_TO_VRV_UNIT),
     pageMarginRight: Math.round(settings.marginRightMm * MM_TO_VRV_UNIT),
     scale: Math.round(settings.notationScalePercent),
-    scaleToPageSize: true,     // scale now actually changes fit, not just post-layout resize
-    justifyVertically: true,   // spreads systems to fill page height instead of leaving dead space
-    spacingLinear: settings.spacingLinear ?? 0.2,        // was implicit default 0.25
-    spacingNonLinear: settings.spacingNonLinear ?? 0.45, // was implicit default 0.6
+    // Do not use scaleToPageSize here. It can shrink the entire score to
+    // minimize the number of pages, which is the opposite of the engraver
+    // behavior we want. The score should keep its chosen notation size and
+    // let Verovio create as many systems/pages as the page dimensions require.
+    scaleToPageSize: false,
+    // Keep each page to one system. Verovio's automatic system layout will
+    // fit the system horizontally rather than truncating its staves.
+    systemMaxPerPage: 1,
+    // If a system is too tall for the printable page, shrink it only as much
+    // as necessary to fit vertically. This preserves the largest usable
+    // system size instead of shrinking the whole score to reduce page count.
+    shrinkToFit: true,
+    justifyVertically: false,
+    spacingLinear: settings.spacingLinear ?? 0.2,
+    spacingNonLinear: settings.spacingNonLinear ?? 0.45,
     breaks: "auto",
     adjustPageHeight: false,
     mmOutput: true,
@@ -119,49 +130,30 @@ export function buildVerovioOptions(settings) {
   };
 }
 
-/** Bounds for the auto-fit scale search. Manual slider should match these. */
-export const AUTO_FIT_BOUNDS = { minScale: 25, maxScale: 200 };
-
 /**
- * Binary-searches for the largest `scale` that doesn't push the score's
- * page count above what's achievable at `minScale`. Requires a score to
- * already be loaded (loadScore must run first).
+ * Applies the automatic one-system-per-page layout.
  *
- * Mutates toolkit state: leaves it configured at the winning scale with
- * layout already recalculated, so the caller can render right after.
+ * Verovio already knows how to break music into systems and pages. The old
+ * implementation repeatedly changed `scale` until the entire score fit into
+ * the smallest possible number of pages, which could make a long score tiny.
+ *
+ * Auto-fit now means: keep the configured notation size, let Verovio lay out
+ * each system to the available page width, and put at most one system on each
+ * page. No page-count-based scaling is performed.
+ *
+ * Requires a score to already be loaded (loadScore must run first).
  */
-export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
+export function findAutoFitScale(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
-  const { minScale, maxScale } = bounds;
-  const baseOptions = buildVerovioOptions(settings); // includes scaleToPageSize: true
 
-  toolkit.setOptions({ ...baseOptions, scale: minScale });
-  toolkit.redoLayout();
-  const minPageCount = toolkit.getPageCount();
-
-  let lo = minScale;
-  let hi = maxScale;
-  let best = minScale;
-
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    toolkit.setOptions({ ...baseOptions, scale: mid });
-    toolkit.redoLayout();
-    const pageCount = toolkit.getPageCount();
-
-    if (pageCount <= minPageCount) {
-      best = mid;
-      lo = mid + 1; // try bigger
-    } else {
-      hi = mid - 1; // too big, shrink
-    }
-  }
-
-  // Leave toolkit in the winning, already-laid-out state.
-  toolkit.setOptions({ ...baseOptions, scale: best });
+  const options = buildVerovioOptions(settings);
+  toolkit.setOptions(options);
   toolkit.redoLayout();
 
-  return { scale: best, pageCount: minPageCount };
+  return {
+    scale: Math.round(settings.notationScalePercent),
+    pageCount: toolkit.getPageCount(),
+  };
 }
 
 /**
