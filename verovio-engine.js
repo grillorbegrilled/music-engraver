@@ -131,13 +131,19 @@ export function findAutoFitScale(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
 
   const baseOptions = buildVerovioOptions(settings);
-  const printableHeight = baseOptions.pageHeight - baseOptions.pageMarginTop - baseOptions.pageMarginBottom;
+  
+  // Available printable height in tenths of a mm
+  const printableHeight =
+    baseOptions.pageHeight -
+    baseOptions.pageMarginTop -
+    baseOptions.pageMarginBottom;
 
-  // 1. Measure the natural height of the system at 100% scale without page constraints
+  // 1. Force 1 system per page with unscaled height to measure ONE system's footprint
   const testOptions = {
     ...baseOptions,
     scale: 100,
     pageHeight: 60000,
+    systemMaxPerPage: 1,
     adjustPageHeight: true,
     shrinkToFit: false,
   };
@@ -145,22 +151,27 @@ export function findAutoFitScale(settings) {
   toolkit.setOptions(testOptions);
   toolkit.redoLayout();
 
+  // 2. Render Page 1 SVG
   const svg = toolkit.renderToSVG(1);
   let targetScale = Math.round(settings.notationScalePercent);
 
-  const viewBoxMatch = svg.match(/viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/);
+  const viewBoxMatch = svg.match(
+    /viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/
+  );
 
   if (viewBoxMatch && viewBoxMatch[1]) {
     const unscaledSystemHeight = parseFloat(viewBoxMatch[1]);
 
-    // 2. Determine maximum scale factor that guarantees vertical fit
+    // 3. Compare unscaled height to printable height with a 5% safety margin
     if (unscaledSystemHeight > printableHeight) {
-      const maxVertScale = Math.floor((printableHeight / unscaledSystemHeight) * 100);
+      const maxVertScale = Math.floor(
+        (printableHeight / unscaledSystemHeight) * 95
+      );
       targetScale = Math.min(targetScale, maxVertScale);
     }
   }
 
-  // 3. Perform layout pass at target scale so breaks optimize to full horizontal width
+  // 4. Re-run final layout using the corrected scale
   const finalSettings = { ...settings, notationScalePercent: targetScale };
   toolkit.setOptions(buildVerovioOptions(finalSettings));
   toolkit.redoLayout();
