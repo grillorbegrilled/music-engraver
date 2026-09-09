@@ -1,5 +1,5 @@
 // main.js
-import { loadScore, updateSettings, renderPage, PAGE_SIZES_MM } from "./verovio-engine.js";
+import { loadScore, updateSettings, renderPage, PAGE_SIZE_MM } from "./verovio-engine.js";
 
 // -- element references ----------------------------------------------------
 
@@ -9,7 +9,6 @@ const scoreArea = document.getElementById("score-area");
 const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error");
 
-const pageSizeEl = document.getElementById("page-size");
 const orientationEl = document.getElementById("orientation");
 const scaleEl = document.getElementById("scale");
 const scaleValueEl = document.getElementById("scale-value");
@@ -26,7 +25,6 @@ let loadedFileName = "score";
 
 function currentSettings() {
   return {
-    pageSize: pageSizeEl.value,
     orientation: orientationEl.value,
     notationScalePercent: Number(scaleEl.value),
     marginTopMm: Number(marginTopEl.value),
@@ -121,12 +119,17 @@ function yieldToMainThread() {
   return new Promise((resolve) => setTimeout(resolve, 30));
 }
 
+/**
+ * Creates a fully standalone, valid SVG string with explicit dimensions and namespace
+ */
 function prepareStandaloneSvgString(svgElement, targetWidthPx, targetHeightPx) {
   const clone = svgElement.cloneNode(true);
 
+  // Ensure standard SVG XML namespace attributes exist
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
+  // Get current width/height or viewBox
   const viewBox = clone.getAttribute("viewBox");
   let nativeWidth = parseFloat(clone.getAttribute("width"));
   let nativeHeight = parseFloat(clone.getAttribute("height"));
@@ -139,6 +142,7 @@ function prepareStandaloneSvgString(svgElement, targetWidthPx, targetHeightPx) {
     }
   }
 
+  // Explicitly set absolute pixel dimensions on the SVG element
   clone.setAttribute("width", `${targetWidthPx}px`);
   clone.setAttribute("height", `${targetHeightPx}px`);
   
@@ -154,6 +158,7 @@ function renderSvgToCanvas(svgElement, canvas, widthPx, heightPx) {
     const ctx = canvas.getContext("2d");
     const svgString = prepareStandaloneSvgString(svgElement, widthPx, heightPx);
     
+    // Encode as Base64 Data URI to prevent cross-origin and font resolution issues
     const encodedSvg = unescape(encodeURIComponent(svgString));
     const dataUrl = "data:image/svg+xml;base64," + btoa(encodedSvg);
 
@@ -175,7 +180,7 @@ function renderSvgToCanvas(svgElement, canvas, widthPx, heightPx) {
   });
 }
 
-// -- PDF Export Handler ---------------------------------------------------
+// -- PDF Export Handler (Fixed 1:1 Page Mapping) --------------------------
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
@@ -187,9 +192,8 @@ async function exportPdf() {
 
   try {
     const settings = currentSettings();
-    const size = PAGE_SIZES_MM[settings.pageSize] || PAGE_SIZES_MM.a4;
-    let widthMm = size.width;
-    let heightMm = size.height;
+    let widthMm = PAGE_SIZE_MM.width;
+    let heightMm = PAGE_SIZE_MM.height;
 
     if (settings.orientation === "landscape") {
       [widthMm, heightMm] = [heightMm, widthMm];
@@ -199,6 +203,7 @@ async function exportPdf() {
       throw new Error("jsPDF library is not loaded.");
     }
 
+    // Target ONLY direct page containers to avoid capturing hidden defs/font SVGs
     const pageContainers = scoreArea.querySelectorAll(".page");
     const validSvgElements = [];
 
@@ -211,6 +216,7 @@ async function exportPdf() {
       throw new Error("No rendered score pages found.");
     }
 
+    // Set resolution (2x resolution ~200 DPI)
     const scaleFactor = 2;
     const canvasWidthPx = Math.round((widthMm * 96) / 25.4) * scaleFactor;
     const canvasHeightPx = Math.round((heightMm * 96) / 25.4) * scaleFactor;
@@ -220,6 +226,7 @@ async function exportPdf() {
 
     const { jsPDF } = window.jspdf;
     
+    // Initialize jsPDF — starts with 1 blank page automatically
     const pdf = new jsPDF({
       orientation: settings.orientation,
       unit: "mm",
@@ -230,6 +237,7 @@ async function exportPdf() {
     for (let i = 0; i < validSvgElements.length; i++) {
       const pageIndex = i + 1;
 
+      // Add a new page ONLY after page 1
       if (i > 0) {
         pdf.addPage([widthMm, heightMm], settings.orientation);
       }
@@ -239,10 +247,12 @@ async function exportPdf() {
 
       const svgElement = validSvgElements[i];
 
+      // Paint SVG onto shared canvas
       await renderSvgToCanvas(svgElement, sharedCanvas, canvasWidthPx, canvasHeightPx);
 
       const imgData = sharedCanvas.toDataURL("image/jpeg", 0.92);
 
+      // Explicitly set focus to current page index before adding image
       pdf.setPage(pageIndex);
       pdf.addImage(imgData, "JPEG", 0, 0, widthMm, heightMm, undefined, "FAST");
 
@@ -269,6 +279,7 @@ fileInput.addEventListener("change", () => {
   if (file) handleFile(file);
 });
 
+// Drag and drop onto the score area.
 scoreArea.addEventListener("dragover", (event) => {
   event.preventDefault();
   scoreArea.classList.add("drag-over");
@@ -300,7 +311,8 @@ const applySettingsChange = debounce(async () => {
   clearError();
   setStatus("Re-engraving…");
   try {
-    totalPages = updateSettings(currentSettings());
+    const settings = currentSettings();
+    totalPages = updateSettings(settings);
     renderAllPages(totalPages);
     setStatus(`${totalPages} page${totalPages === 1 ? "" : "s"}`);
   } catch (err) {
@@ -309,7 +321,7 @@ const applySettingsChange = debounce(async () => {
   }
 }, 400);
 
-[pageSizeEl, orientationEl, marginTopEl, marginBottomEl, marginLeftEl, marginRightEl].forEach(
+[orientationEl, marginTopEl, marginBottomEl, marginLeftEl, marginRightEl].forEach(
   (el) => el.addEventListener("change", applySettingsChange)
 );
 
