@@ -120,8 +120,13 @@ export function buildVerovioOptions(settings) {
     // system size instead of shrinking the whole score to reduce page count.
     shrinkToFit: true,
     justifyVertically: false,
-    spacingLinear: settings.spacingLinear ?? 0.2,
-    spacingNonLinear: settings.spacingNonLinear ?? 0.45,
+    spacingLinear: settings.spacingLinear ?? 0.25,
+    spacingNonLinear: settings.spacingNonLinear ?? 0.6,
+    // systemMaxPerPage:1 means every system is "last on its page." Verovio
+    // only justifies a last system if its natural width already reaches
+    // minLastJustification (default 0.8 = 80%) of the page width. Force 0
+    // so every system stretches to fill the page regardless.
+    minLastJustification: 0,
     breaks: "auto",
     adjustPageHeight: false,
     mmOutput: true,
