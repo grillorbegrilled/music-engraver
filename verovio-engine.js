@@ -107,12 +107,12 @@ export function buildVerovioOptions(settings) {
     pageMarginLeft: Math.round(settings.marginLeftMm * MM_TO_VRV_UNIT),
     pageMarginRight: Math.round(settings.marginRightMm * MM_TO_VRV_UNIT),
     scale: Math.round(settings.notationScalePercent),
-    scaleToPageSize: true,     // scale now actually changes fit, not just post-layout resize
+    scaleToPageSize: true,     // scale changes fit, not just post-layout resize
     justifyVertically: true,   // spreads systems to fill page height instead of leaving dead space
     spacingLinear: settings.spacingLinear ?? 0.2,        // was implicit default 0.25
     spacingNonLinear: settings.spacingNonLinear ?? 0.45, // was implicit default 0.6
     breaks: "auto",
-    systemMax: 0,              // 0 resets system limit for manual scaling
+    systemMax: 0,              // 0 = unconstrained max systems for manual mode
     adjustPageHeight: false,
     mmOutput: true,
     header: "none",
@@ -176,27 +176,27 @@ function getStaffCount() {
 }
 
 /**
- * Auto-fits the conductor's score vertically.
- * Restricts maximum systems per page (1 system, or 2 systems for scores <= 5 staves)
- * and binary searches for the largest scale that does not force additional page splits.
+ * Auto-fits conductor's score vertically.
+ * Sets `systemMax` explicitly on Verovio (1 for >5 staves, 2 for <=5 staves)
+ * and binary searches for the largest notation scale before systems spill
+ * over or clip off the page boundaries.
  */
 export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   if (!toolkit) throw new Error("No score is loaded yet.");
   const { minScale, maxScale } = bounds;
-  
-  const staffCount = getStaffCount();
-  const maxSystemsPerPage = staffCount > 0 && staffCount <= 5 ? 2 : 1;
 
-  // Build base settings with strict system-per-page bounds enforced during search
+  const staffCount = getStaffCount();
+  const maxSystems = staffCount > 0 && staffCount <= 5 ? 2 : 1;
+
   const baseOptions = {
     ...buildVerovioOptions(settings),
-    systemMax: maxSystemsPerPage,
+    systemMax: maxSystems,
   };
 
-  // Determine baseline page count at minimum scale with max system limits
+  // Find natural baseline page count when systemMax is active at min scale
   toolkit.setOptions({ ...baseOptions, scale: minScale });
   toolkit.redoLayout();
-  const basePageCount = toolkit.getPageCount();
+  const baselinePageCount = toolkit.getPageCount();
 
   let lo = minScale;
   let hi = maxScale;
@@ -206,23 +206,35 @@ export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
     const mid = Math.floor((lo + hi) / 2);
     toolkit.setOptions({ ...baseOptions, scale: mid });
     toolkit.redoLayout();
-    
-    const pageCount = toolkit.getPageCount();
 
-    // If page count matches baseline, current scale fits without pushing staves over page boundary
-    if (pageCount <= basePageCount) {
+    const currentPageCount = toolkit.getPageCount();
+
+    // Verify system count on rendered pages doesn't exceed target max systems
+    let validLayout = currentPageCount >= baselinePageCount;
+    if (validLayout) {
+      for (let p = 1; p <= currentPageCount; p++) {
+        const svg = toolkit.renderToSVG(p);
+        const matches = svg.match(/class="[^"]*\bsystem\b[^"]*"/g) || [];
+        if (matches.length > maxSystems) {
+          validLayout = false;
+          break;
+        }
+      }
+    }
+
+    if (validLayout) {
       best = mid;
-      lo = mid + 1; // Try larger scale
+      lo = mid + 1; // Try larger notation scale
     } else {
-      hi = mid - 1; // Scale pushed staves/systems over printable height; shrink
+      hi = mid - 1; // Scale pushed layout over boundary; shrink
     }
   }
 
-  // Set final calculated options on toolkit, explicitly leaving systemMax active ONLY for auto-fit
+  // Set winning settings with active systemMax constraint
   const finalOptions = {
     ...buildVerovioOptions(settings),
     scale: best,
-    systemMax: maxSystemsPerPage,
+    systemMax: maxSystems,
   };
 
   toolkit.setOptions(finalOptions);
