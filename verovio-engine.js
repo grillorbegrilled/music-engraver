@@ -158,20 +158,31 @@ export function findAutoFitScale(settings) {
   toolkit.setOptions(testOptions);
   toolkit.redoLayout();
 
-  const svg = toolkit.renderToSVG(1);
   let calculatedScale = Math.round(settings.notationScalePercent);
 
-  // 2. Parse the viewBox height from the SVG
-  const viewBoxMatch = svg.match(/viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/);
-
-  if (viewBoxMatch && viewBoxMatch[1]) {
-    const naturalHeight = parseFloat(viewBoxMatch[1]);
-
-    // 3. If it's too tall, scale down proportionately
-    if (naturalHeight > targetHeight) {
-      const ratio = targetHeight / naturalHeight;
-      calculatedScale = Math.floor(calculatedScale * ratio * 0.99);
+  // 2. Check every system's natural height, not just the first. A later
+  // system (extra dynamics, ties, divisi, etc. needing more vertical room)
+  // can be taller than the first one. If we scale for the first system only,
+  // a taller one downstream will trip Verovio's own internal shrinkToFit
+  // during the final render — which shrinks that system's width too, *after*
+  // justification already stretched it to fill the page. That's what was
+  // leaving ragged/empty margins on some systems, especially in landscape
+  // where there's much less vertical headroom to begin with.
+  const viewBoxPattern = /viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/;
+  let naturalHeight = 0;
+  const testPageCount = toolkit.getPageCount();
+  for (let page = 1; page <= testPageCount; page++) {
+    const svg = toolkit.renderToSVG(page);
+    const match = svg.match(viewBoxPattern);
+    if (match && match[1]) {
+      naturalHeight = Math.max(naturalHeight, parseFloat(match[1]));
     }
+  }
+
+  // 3. If the tallest system is too tall, scale down proportionately
+  if (naturalHeight > targetHeight) {
+    const ratio = targetHeight / naturalHeight;
+    calculatedScale = Math.floor(calculatedScale * ratio * 0.99);
   }
 
   // 4. Re-run the final layout with the corrected scale
