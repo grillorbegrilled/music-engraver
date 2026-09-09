@@ -144,54 +144,60 @@ export function buildVerovioOptions(settings) {
 export function findAutoFitScale(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
 
-  const baseOptions = buildVerovioOptions(settings);
-  const targetHeight = baseOptions.pageHeight;
-
-  // 1. Run a test layout with infinite height to find the true vertical size
-  const testOptions = {
-    ...baseOptions,
-    pageHeight: 60000,
-    adjustPageHeight: true,
-    shrinkToFit: false
-  };
-
-  toolkit.setOptions(testOptions);
-  toolkit.redoLayout();
-
-  let calculatedScale = Math.round(settings.notationScalePercent);
-
-  // 2. Check every system's natural height, not just the first. A later
-  // system (extra dynamics, ties, divisi, etc. needing more vertical room)
-  // can be taller than the first one. If we scale for the first system only,
-  // a taller one downstream will trip Verovio's own internal shrinkToFit
-  // during the final render — which shrinks that system's width too, *after*
-  // justification already stretched it to fill the page. That's what was
-  // leaving ragged/empty margins on some systems, especially in landscape
-  // where there's much less vertical headroom to begin with.
+  const targetHeight = buildVerovioOptions(settings).pageHeight;
   const viewBoxPattern = /viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/;
-  let naturalHeight = 0;
-  const testPageCount = toolkit.getPageCount();
-  for (let page = 1; page <= testPageCount; page++) {
-    const svg = toolkit.renderToSVG(page);
-    const match = svg.match(viewBoxPattern);
-    if (match && match[1]) {
-      naturalHeight = Math.max(naturalHeight, parseFloat(match[1]));
+
+  // Renders the WHOLE score at a candidate scale, using the real target
+  // page height and shrinkToFit OFF, and checks whether every system
+  // actually fits. This is the true final cast-off at that exact scale —
+  // not an estimate borrowed from a different scale's layout — because
+  // which measures land on which system shifts depending on scale, so a
+  // number extrapolated from one layout doesn't reliably predict another.
+  // Checking the real thing is the only way to be sure Verovio's internal
+  // shrinkToFit (which quietly squashes width too, after justification
+  // already ran) never has a reason to kick in later.
+  function fitsAtScale(candidateScale) {
+    const options = {
+      ...buildVerovioOptions({ ...settings, notationScalePercent: candidateScale }),
+      shrinkToFit: false,
+    };
+    toolkit.setOptions(options);
+    toolkit.redoLayout();
+    const pageCount = toolkit.getPageCount();
+    for (let page = 1; page <= pageCount; page++) {
+      const svg = toolkit.renderToSVG(page);
+      const match = svg.match(viewBoxPattern);
+      const height = match && match[1] ? parseFloat(match[1]) : 0;
+      // Small safety margin against floating-point rounding at the edge.
+      if (height > targetHeight * 0.995) return false;
+    }
+    return true;
+  }
+
+  // Binary search the largest integer scale (1–200%) whose real layout
+  // fits every page without needing any internal shrink.
+  let lo = 1;
+  let hi = 200;
+  let best = 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (fitsAtScale(mid)) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
     }
   }
 
-  // 3. If the tallest system is too tall, scale down proportionately
-  if (naturalHeight > targetHeight) {
-    const ratio = targetHeight / naturalHeight;
-    calculatedScale = Math.floor(calculatedScale * ratio * 0.99);
-  }
-
-  // 4. Re-run the final layout with the corrected scale
-  const finalSettings = { ...settings, notationScalePercent: calculatedScale };
+  // Final real render at the verified-fitting scale. shrinkToFit stays on
+  // in buildVerovioOptions as a last-resort safety net, but it should have
+  // nothing left to do.
+  const finalSettings = { ...settings, notationScalePercent: best };
   toolkit.setOptions(buildVerovioOptions(finalSettings));
   toolkit.redoLayout();
 
   return {
-    scale: calculatedScale,
+    scale: best,
     pageCount: toolkit.getPageCount(),
   };
 }
