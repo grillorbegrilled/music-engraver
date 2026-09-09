@@ -131,27 +131,51 @@ export function buildVerovioOptions(settings) {
 }
 
 /**
- * Applies the automatic one-system-per-page layout.
- *
- * Verovio already knows how to break music into systems and pages. The old
- * implementation repeatedly changed `scale` until the entire score fit into
- * the smallest possible number of pages, which could make a long score tiny.
- *
- * Auto-fit now means: keep the configured notation size, let Verovio lay out
- * each system to the available page width, and put at most one system on each
- * page. No page-count-based scaling is performed.
+ * Applies the automatic one-system-per-page layout and auto-calculates 
+ * the maximum scale that fits the vertical page limits.
  *
  * Requires a score to already be loaded (loadScore must run first).
  */
 export function findAutoFitScale(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
 
-  const options = buildVerovioOptions(settings);
-  toolkit.setOptions(options);
+  const baseOptions = buildVerovioOptions(settings);
+  const targetHeight = baseOptions.pageHeight;
+
+  // 1. Run a test layout with infinite height to find the true vertical size
+  const testOptions = {
+    ...baseOptions,
+    pageHeight: 60000,
+    adjustPageHeight: true,
+    shrinkToFit: false
+  };
+
+  toolkit.setOptions(testOptions);
+  toolkit.redoLayout();
+
+  const svg = toolkit.renderToSVG(1);
+  let calculatedScale = Math.round(settings.notationScalePercent);
+
+  // 2. Parse the viewBox height from the SVG
+  const viewBoxMatch = svg.match(/viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/);
+
+  if (viewBoxMatch && viewBoxMatch[1]) {
+    const naturalHeight = parseFloat(viewBoxMatch[1]);
+
+    // 3. If it's too tall, scale down proportionately
+    if (naturalHeight > targetHeight) {
+      const ratio = targetHeight / naturalHeight;
+      calculatedScale = Math.floor(calculatedScale * ratio * 0.99);
+    }
+  }
+
+  // 4. Re-run the final layout with the corrected scale
+  const finalSettings = { ...settings, notationScalePercent: calculatedScale };
+  toolkit.setOptions(buildVerovioOptions(finalSettings));
   toolkit.redoLayout();
 
   return {
-    scale: Math.round(settings.notationScalePercent),
+    scale: calculatedScale,
     pageCount: toolkit.getPageCount(),
   };
 }
