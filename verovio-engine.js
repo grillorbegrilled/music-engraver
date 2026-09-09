@@ -125,8 +125,8 @@ export function buildVerovioOptions(settings) {
     breaks: "auto",
     adjustPageHeight: false,
     mmOutput: true,
-    header: "none",
-    footer: "none",
+    header: "auto",
+    footer: "auto",
   };
 }
 
