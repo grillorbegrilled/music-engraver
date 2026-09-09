@@ -1,97 +1,50 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Verovio Score Engraver & PDF Exporter</title>
+<!-- index.html (Sidebar fragment) -->
+<aside class="sidebar">
+  <h2>Page Setup</h2>
 
-    <!-- jsPDF Engine -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <div class="control-group">
+    <label for="page-size">Page Size</label>
+    <select id="page-size">
+      <option value="letter" selected>Letter</option>
+      <option value="a4">A4</option>
+      <option value="legal">Legal</option>
+      <option value="tabloid">Tabloid (11x17)</option>
+    </select>
+  </div>
 
-    <!-- html2canvas Engine for DOM/SVG Rasterization -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <div class="control-group">
+    <label for="orientation">Orientation</label>
+    <select id="orientation">
+      <option value="portrait" selected>Portrait</option>
+      <option value="landscape">Landscape</option>
+    </select>
+  </div>
 
-    <link rel="stylesheet" href="style.css" />
-  </head>
-  <body>
-    <header class="app-header">
-      <h1>Score Engraver</h1>
-      <div class="header-controls">
-        <label for="file-input" class="button button-primary">
-          Open MusicXML
-          <input type="file" id="file-input" accept=".xml,.musicxml" hidden />
-        </label>
-        <button id="export-pdf-btn" class="button" disabled>Export PDF</button>
-      </div>
-    </header>
+  <div class="control-group">
+    <label for="scale">Notation Scale (<span id="scale-value">100%</span>)</label>
+    <input type="range" id="scale" min="25" max="200" value="100" step="5" />
+  </div>
 
-    <div class="app-layout">
-      <aside class="sidebar">
-        <h2>Page Setup</h2>
-
-        <div class="control-group">
-          <label for="page-size">Page Size</label>
-          <select id="page-size">
-            <option value="letter" selected>Letter</option>
-            <option value="a4">A4</option>
-            <option value="legal">Legal</option>
-            <option value="tabloid">Tabloid (11x17)</option>
-          </select>
-        </div>
-
-        <div class="control-group">
-          <label for="orientation">Orientation</label>
-          <select id="orientation">
-            <option value="portrait">Portrait</option>
-            <option value="landscape" selected>Landscape</option>
-          </select>
-        </div>
-
-        <div class="control-group">
-          <label for="auto-fit">
-            <input type="checkbox" id="auto-fit" checked />
-            Auto-fit to page
-          </label>
-        </div>
-
-        <div class="control-group">
-          <label for="scale">Notation Scale (<span id="scale-value">100%</span>)</label>
-          <input type="range" id="scale" min="25" max="200" value="100" step="5" disabled />
-        </div>
-
-        <h3>Margins (mm)</h3>
-        <div class="margins-grid">
-          <div class="control-group">
-            <label for="margin-top">Top</label>
-            <input type="number" id="margin-top" value="12" min="0" max="50" />
-          </div>
-          <div class="control-group">
-            <label for="margin-bottom">Bottom</label>
-            <input type="number" id="margin-bottom" value="12" min="0" max="50" />
-          </div>
-          <div class="control-group">
-            <label for="margin-left">Left</label>
-            <input type="number" id="margin-left" value="12" min="0" max="50" />
-          </div>
-          <div class="control-group">
-            <label for="margin-right">Right</label>
-            <input type="number" id="margin-right" value="12" min="0" max="50" />
-          </div>
-        </div>
-
-        <div id="status" class="status-message"></div>
-        <div id="error" class="error-message" hidden></div>
-      </aside>
-
-      <main class="main-content">
-        <div id="score-area" class="score-container">
-          <div class="placeholder-text">
-            Drag and drop an uncompressed MusicXML file here, or click "Open MusicXML" to begin.
-          </div>
-        </div>
-      </main>
+  <h3>Margins (mm)</h3>
+  <div class="margins-grid">
+    <div class="control-group">
+      <label for="margin-top">Top</label>
+      <input type="number" id="margin-top" value="12" min="0" max="50" />
     </div>
+    <div class="control-group">
+      <label for="margin-bottom">Bottom</label>
+      <input type="number" id="margin-bottom" value="12" min="0" max="50" />
+    </div>
+    <div class="control-group">
+      <label for="margin-left">Left</label>
+      <input type="number" id="margin-left" value="12" min="0" max="50" />
+    </div>
+    <div class="control-group">
+      <label for="margin-right">Right</label>
+      <input type="number" id="margin-right" value="12" min="0" max="50" />
+    </div>
+  </div>
 
-    <script type="module" src="main.js"></script>
-  </body>
-</html>
+  <div id="status" class="status-message"></div>
+  <div id="error" class="error-message" hidden></div>
+</aside>
