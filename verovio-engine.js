@@ -112,6 +112,7 @@ export function buildVerovioOptions(settings) {
     spacingLinear: settings.spacingLinear ?? 0.2,        // was implicit default 0.25
     spacingNonLinear: settings.spacingNonLinear ?? 0.45, // was implicit default 0.6
     breaks: "auto",
+    systemMax: 0,              // 0 resets system limit for manual scaling
     adjustPageHeight: false,
     mmOutput: true,
     header: "none",
@@ -176,17 +177,26 @@ function getStaffCount() {
 
 /**
  * Auto-fits the conductor's score vertically.
- * Finds the largest scale where a single system (or 2 systems for scores <= 5 staves)
- * fits inside the printable height of the page without overflowing onto extra vertical pages
- * or clipping staves.
+ * Restricts maximum systems per page (1 system, or 2 systems for scores <= 5 staves)
+ * and binary searches for the largest scale that does not force additional page splits.
  */
 export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   if (!toolkit) throw new Error("No score is loaded yet.");
   const { minScale, maxScale } = bounds;
-  const baseOptions = buildVerovioOptions(settings);
-
+  
   const staffCount = getStaffCount();
-  const targetSystemsPerPage = staffCount > 0 && staffCount <= 5 ? 2 : 1;
+  const maxSystemsPerPage = staffCount > 0 && staffCount <= 5 ? 2 : 1;
+
+  // Build base settings with strict system-per-page bounds enforced during search
+  const baseOptions = {
+    ...buildVerovioOptions(settings),
+    systemMax: maxSystemsPerPage,
+  };
+
+  // Determine baseline page count at minimum scale with max system limits
+  toolkit.setOptions({ ...baseOptions, scale: minScale });
+  toolkit.redoLayout();
+  const basePageCount = toolkit.getPageCount();
 
   let lo = minScale;
   let hi = maxScale;
@@ -196,45 +206,29 @@ export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
     const mid = Math.floor((lo + hi) / 2);
     toolkit.setOptions({ ...baseOptions, scale: mid });
     toolkit.redoLayout();
-
-    // Check system count per page directly from Verovio's element layout data
-    let fits = true;
+    
     const pageCount = toolkit.getPageCount();
 
-    for (let p = 1; p <= pageCount; p++) {
-      // Fetch system elements rendered on page `p`
-      const systemsOnPage = toolkit.getElementsAtTime(p) || []; // Fallback layout check
-      // Query page XML structure or system count directly via Verovio
-      const pageData = toolkit.renderToPage(p, { pageWithSvg: false });
-      
-      // Parse layout JSON/attributes if available, or fall back to system count in page tree
-      const pageSvg = toolkit.renderToSVG(p);
-      const systemCount = (pageSvg.match(/class="[^"]*\bsystem\b[^"]*"/g) || []).length;
-      
-      // Verify no staff/system elements are pushed beyond printable margins
-      const containsOverflow = pageSvg.includes('class="system"'); // ensure systems exist
-      
-      if (systemCount > targetSystemsPerPage) {
-        fits = false;
-        break;
-      }
-    }
-
-    // Binary search logic: if system distribution per page is within target, scale can grow
-    if (fits && pageCount > 0) {
+    // If page count matches baseline, current scale fits without pushing staves over page boundary
+    if (pageCount <= basePageCount) {
       best = mid;
-      lo = mid + 1;
+      lo = mid + 1; // Try larger scale
     } else {
-      hi = mid - 1;
+      hi = mid - 1; // Scale pushed staves/systems over printable height; shrink
     }
   }
 
-  // Standardize fallbacks: ensure scale stays within bounded limits and applies cleanly
-  const finalScale = Math.max(minScale, Math.min(maxScale, best));
-  toolkit.setOptions({ ...baseOptions, scale: finalScale });
+  // Set final calculated options on toolkit, explicitly leaving systemMax active ONLY for auto-fit
+  const finalOptions = {
+    ...buildVerovioOptions(settings),
+    scale: best,
+    systemMax: maxSystemsPerPage,
+  };
+
+  toolkit.setOptions(finalOptions);
   toolkit.redoLayout();
 
-  return { scale: finalScale, pageCount: toolkit.getPageCount() };
+  return { scale: best, pageCount: toolkit.getPageCount() };
 }
 
 /**
