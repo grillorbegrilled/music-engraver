@@ -107,26 +107,12 @@ export function buildVerovioOptions(settings) {
     pageMarginLeft: Math.round(settings.marginLeftMm * MM_TO_VRV_UNIT),
     pageMarginRight: Math.round(settings.marginRightMm * MM_TO_VRV_UNIT),
     scale: Math.round(settings.notationScalePercent),
-    // Do not use scaleToPageSize here. It can shrink the entire score to
-    // minimize the number of pages, which is the opposite of the engraver
-    // behavior we want. The score should keep its chosen notation size and
-    // let Verovio create as many systems/pages as the page dimensions require.
     scaleToPageSize: false,
-    // Keep each page to one system. Verovio's automatic system layout will
-    // fit the system horizontally rather than truncating its staves.
     systemMaxPerPage: 1,
-    // If a system is too tall for the printable page, shrink it only as much
-    // as necessary to fit vertically. This preserves the largest usable
-    // system size instead of shrinking the whole score to reduce page count.
-    shrinkToFit: true,
+    shrinkToFit: false,
     justifyVertically: false,
-    spacingLinear: settings.spacingLinear ?? 0.25,
-    spacingNonLinear: settings.spacingNonLinear ?? 0.6,
-    // systemMaxPerPage:1 means every system is "last on its page." Verovio
-    // only justifies a last system if its natural width already reaches
-    // minLastJustification (default 0.8 = 80%) of the page width. Force 0
-    // so every system stretches to fill the page regardless.
-    minLastJustification: 0,
+    spacingLinear: settings.spacingLinear ?? 0.2,
+    spacingNonLinear: settings.spacingNonLinear ?? 0.45,
     breaks: "auto",
     adjustPageHeight: false,
     mmOutput: true,
@@ -136,68 +122,51 @@ export function buildVerovioOptions(settings) {
 }
 
 /**
- * Applies the automatic one-system-per-page layout and auto-calculates 
- * the maximum scale that fits the vertical page limits.
+ * Calculates the exact notation scale required for a single vertical system 
+ * to fit within printable page bounds BEFORE line breaks are generated.
  *
  * Requires a score to already be loaded (loadScore must run first).
  */
 export function findAutoFitScale(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
 
-  const targetHeight = buildVerovioOptions(settings).pageHeight;
-  const viewBoxPattern = /viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/;
+  const baseOptions = buildVerovioOptions(settings);
+  const printableHeight = baseOptions.pageHeight - baseOptions.pageMarginTop - baseOptions.pageMarginBottom;
 
-  // Renders the WHOLE score at a candidate scale, using the real target
-  // page height and shrinkToFit OFF, and checks whether every system
-  // actually fits. This is the true final cast-off at that exact scale —
-  // not an estimate borrowed from a different scale's layout — because
-  // which measures land on which system shifts depending on scale, so a
-  // number extrapolated from one layout doesn't reliably predict another.
-  // Checking the real thing is the only way to be sure Verovio's internal
-  // shrinkToFit (which quietly squashes width too, after justification
-  // already ran) never has a reason to kick in later.
-  function fitsAtScale(candidateScale) {
-    const options = {
-      ...buildVerovioOptions({ ...settings, notationScalePercent: candidateScale }),
-      shrinkToFit: false,
-    };
-    toolkit.setOptions(options);
-    toolkit.redoLayout();
-    const pageCount = toolkit.getPageCount();
-    for (let page = 1; page <= pageCount; page++) {
-      const svg = toolkit.renderToSVG(page);
-      const match = svg.match(viewBoxPattern);
-      const height = match && match[1] ? parseFloat(match[1]) : 0;
-      // Small safety margin against floating-point rounding at the edge.
-      if (height > targetHeight * 0.995) return false;
-    }
-    return true;
-  }
+  // 1. Measure the natural height of the system at 100% scale without page constraints
+  const testOptions = {
+    ...baseOptions,
+    scale: 100,
+    pageHeight: 60000,
+    adjustPageHeight: true,
+    shrinkToFit: false,
+  };
 
-  // Binary search the largest integer scale (1–200%) whose real layout
-  // fits every page without needing any internal shrink.
-  let lo = 1;
-  let hi = 200;
-  let best = 1;
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (fitsAtScale(mid)) {
-      best = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
+  toolkit.setOptions(testOptions);
+  toolkit.redoLayout();
+
+  const svg = toolkit.renderToSVG(1);
+  let targetScale = Math.round(settings.notationScalePercent);
+
+  const viewBoxMatch = svg.match(/viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/);
+
+  if (viewBoxMatch && viewBoxMatch[1]) {
+    const unscaledSystemHeight = parseFloat(viewBoxMatch[1]);
+
+    // 2. Determine maximum scale factor that guarantees vertical fit
+    if (unscaledSystemHeight > printableHeight) {
+      const maxVertScale = Math.floor((printableHeight / unscaledSystemHeight) * 100);
+      targetScale = Math.min(targetScale, maxVertScale);
     }
   }
 
-  // Final real render at the verified-fitting scale. shrinkToFit stays on
-  // in buildVerovioOptions as a last-resort safety net, but it should have
-  // nothing left to do.
-  const finalSettings = { ...settings, notationScalePercent: best };
+  // 3. Perform layout pass at target scale so breaks optimize to full horizontal width
+  const finalSettings = { ...settings, notationScalePercent: targetScale };
   toolkit.setOptions(buildVerovioOptions(finalSettings));
   toolkit.redoLayout();
 
   return {
-    scale: best,
+    scale: targetScale,
     pageCount: toolkit.getPageCount(),
   };
 }
