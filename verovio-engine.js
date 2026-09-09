@@ -107,12 +107,11 @@ export function buildVerovioOptions(settings) {
     pageMarginLeft: Math.round(settings.marginLeftMm * MM_TO_VRV_UNIT),
     pageMarginRight: Math.round(settings.marginRightMm * MM_TO_VRV_UNIT),
     scale: Math.round(settings.notationScalePercent),
-    scaleToPageSize: true,     // scale changes fit, not just post-layout resize
+    scaleToPageSize: true,     // scale now actually changes fit, not just post-layout resize
     justifyVertically: true,   // spreads systems to fill page height instead of leaving dead space
     spacingLinear: settings.spacingLinear ?? 0.2,        // was implicit default 0.25
     spacingNonLinear: settings.spacingNonLinear ?? 0.45, // was implicit default 0.6
     breaks: "auto",
-    systemMax: 0,              // 0 = unconstrained max systems for manual mode
     adjustPageHeight: false,
     mmOutput: true,
     header: "none",
@@ -124,14 +123,17 @@ export function buildVerovioOptions(settings) {
 export const AUTO_FIT_BOUNDS = { minScale: 25, maxScale: 200 };
 
 /**
- * Isolated single-page fit function for individual instrument parts.
- * Binary-searches for the largest `scale` that compresses the score onto
- * a single target page count (specifically 1 page).
+ * Binary-searches for the largest `scale` that doesn't push the score's
+ * page count above what's achievable at `minScale`. Requires a score to
+ * already be loaded (loadScore must run first).
+ *
+ * Mutates toolkit state: leaves it configured at the winning scale with
+ * layout already recalculated, so the caller can render right after.
  */
-export function findSinglePageFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
+export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   if (!toolkit) throw new Error("No score is loaded yet.");
   const { minScale, maxScale } = bounds;
-  const baseOptions = buildVerovioOptions(settings);
+  const baseOptions = buildVerovioOptions(settings); // includes scaleToPageSize: true
 
   toolkit.setOptions({ ...baseOptions, scale: minScale });
   toolkit.redoLayout();
@@ -160,87 +162,6 @@ export function findSinglePageFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
   toolkit.redoLayout();
 
   return { scale: best, pageCount: minPageCount };
-}
-
-/**
- * Determines total staff count across the score.
- */
-function getStaffCount() {
-  if (!toolkit) return 0;
-  try {
-    const elements = toolkit.getElementAttr("//staffDef");
-    return Array.isArray(elements) ? elements.length : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Auto-fits conductor's score vertically.
- * Sets `systemMax` explicitly on Verovio (1 for >5 staves, 2 for <=5 staves)
- * and binary searches for the largest notation scale before systems spill
- * over or clip off the page boundaries.
- */
-export function findAutoFitScale(settings, bounds = AUTO_FIT_BOUNDS) {
-  if (!toolkit) throw new Error("No score is loaded yet.");
-  const { minScale, maxScale } = bounds;
-
-  const staffCount = getStaffCount();
-  const maxSystems = staffCount > 0 && staffCount <= 5 ? 2 : 1;
-
-  const baseOptions = {
-    ...buildVerovioOptions(settings),
-    systemMax: maxSystems,
-  };
-
-  // Find natural baseline page count when systemMax is active at min scale
-  toolkit.setOptions({ ...baseOptions, scale: minScale });
-  toolkit.redoLayout();
-  const baselinePageCount = toolkit.getPageCount();
-
-  let lo = minScale;
-  let hi = maxScale;
-  let best = minScale;
-
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    toolkit.setOptions({ ...baseOptions, scale: mid });
-    toolkit.redoLayout();
-
-    const currentPageCount = toolkit.getPageCount();
-
-    // Verify system count on rendered pages doesn't exceed target max systems
-    let validLayout = currentPageCount >= baselinePageCount;
-    if (validLayout) {
-      for (let p = 1; p <= currentPageCount; p++) {
-        const svg = toolkit.renderToSVG(p);
-        const matches = svg.match(/class="[^"]*\bsystem\b[^"]*"/g) || [];
-        if (matches.length > maxSystems) {
-          validLayout = false;
-          break;
-        }
-      }
-    }
-
-    if (validLayout) {
-      best = mid;
-      lo = mid + 1; // Try larger notation scale
-    } else {
-      hi = mid - 1; // Scale pushed layout over boundary; shrink
-    }
-  }
-
-  // Set winning settings with active systemMax constraint
-  const finalOptions = {
-    ...buildVerovioOptions(settings),
-    scale: best,
-    systemMax: maxSystems,
-  };
-
-  toolkit.setOptions(finalOptions);
-  toolkit.redoLayout();
-
-  return { scale: best, pageCount: toolkit.getPageCount() };
 }
 
 /**
