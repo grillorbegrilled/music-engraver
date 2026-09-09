@@ -1,187 +1,224 @@
-// verovio-engine.js
-//
-// Thin wrapper around the Verovio WASM toolkit. Nothing in this file
-// knows about the DOM or about app UI state — it only knows how to
-// turn (MusicXML text + engraving settings) into SVG pages.
-//
-// Verovio is loaded from jsDelivr at runtime (not bundled), because this
-// project has no build step. See README-spike.md for why.
+/**
+ * Verovio engraving engine wrapper.
+ *
+ * Loads Verovio WASM from jsDelivr and provides the application with a
+ * small, stable API for loading MusicXML, updating engraving settings,
+ * rendering pages, and determining an appropriate notation scale.
+ */
 
-const VEROVIO_SCRIPT_URL =
-  "https://cdn.jsdelivr.net/npm/verovio@5.2.0/dist/verovio-toolkit-wasm.js";
+const VEROVIO_VERSION = "5.2.0";
+const VEROVIO_URL =
+  `https://cdn.jsdelivr.net/npm/verovio@${VEROVIO_VERSION}/` +
+  "dist/verovio-toolkit-wasm.js";
 
-let scriptLoadPromise = null;
-let toolkitReadyPromise = null;
+let verovioModule = null;
 let toolkit = null;
 
-/**
- * Injects the Verovio <script> tag once and resolves when the global
- * `verovio` object exists. Safe to call multiple times.
- */
-function loadVerovioScript() {
-  if (scriptLoadPromise) return scriptLoadPromise;
-
-  scriptLoadPromise = new Promise((resolve, reject) => {
-    if (window.verovio) {
-      resolve(window.verovio);
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = VEROVIO_SCRIPT_URL;
-    script.onload = () => {
-      if (window.verovio) {
-        resolve(window.verovio);
-      } else {
-        reject(new Error("Verovio script loaded but window.verovio is missing."));
-      }
-    };
-    script.onerror = () => {
-      reject(new Error("Could not load the Verovio engraving engine from the CDN."));
-    };
-    document.head.appendChild(script);
-  });
-
-  return scriptLoadPromise;
-}
-
-/**
- * Resolves once a Verovio toolkit instance exists and its WASM runtime
- * has finished initializing. Only ever creates one instance.
- */
-export function getToolkit() {
-  if (toolkitReadyPromise) return toolkitReadyPromise;
-
-  toolkitReadyPromise = loadVerovioScript().then((verovio) => {
-    return new Promise((resolve, reject) => {
-      try {
-        verovio.module.onRuntimeInitialized = () => {
-          toolkit = new verovio.toolkit();
-          resolve(toolkit);
-        };
-      } catch (err) {
-        reject(err);
-      }
-    });
-  });
-
-  return toolkitReadyPromise;
-}
-
-// --- Option translation --------------------------------------------------
-// The app UI works in millimeters and plain percentages. Verovio's
-// toolkit options are integers in "tenths of a millimeter" (its
-// internal abstract unit — confirmed against the Verovio reference book:
-// default pageHeight 2970 / pageWidth 2100 == A4 in tenths-of-mm).
-
-const MM_TO_VRV_UNIT = 10;
-
-export const PAGE_SIZES_MM = {
+const PAGE_SIZES_MM = {
   letter: { width: 215.9, height: 279.4 },
   a4: { width: 210, height: 297 },
   legal: { width: 215.9, height: 355.6 },
 };
 
-/**
- * @param {object} settings
- * @param {"letter"|"a4"|"legal"} settings.pageSize
- * @param {"portrait"|"landscape"} settings.orientation
- * @param {number} settings.marginTopMm
- * @param {number} settings.marginBottomMm
- * @param {number} settings.marginLeftMm
- * @param {number} settings.marginRightMm
- * @param {number} settings.notationScalePercent  e.g. 100 = default size
- */
-export function buildVerovioOptions(settings) {
-  const size = PAGE_SIZES_MM[settings.pageSize] || PAGE_SIZES_MM.a4;
-  let widthMm = size.width;
-  let heightMm = size.height;
-  if (settings.orientation === "landscape") {
-    [widthMm, heightMm] = [heightMm, widthMm];
+function mmToVerovio(mm) {
+  return Math.round(mm * 10);
+}
+
+function getPageSize(settings) {
+  const size = PAGE_SIZES_MM[settings.pageSize] || PAGE_SIZES_MM.letter;
+  return {
+    width: size.width,
+    height: size.height,
+  };
+}
+
+export async function initializeVerovio() {
+  if (toolkit) return toolkit;
+
+  if (!verovioModule) {
+    const module = await import(VEROVIO_URL);
+    verovioModule = await module.default();
   }
 
+  toolkit = new verovioModule.toolkit();
+  return toolkit;
+}
+
+export function getToolkit() {
+  if (!toolkit) {
+    throw new Error("Verovio has not been initialized.");
+  }
+
+  return toolkit;
+}
+
+function buildVerovioOptions(settings) {
+  const page = getPageSize(settings);
+
+  const marginTop = settings.marginTop ?? 10;
+  const marginBottom = settings.marginBottom ?? 10;
+  const marginLeft = settings.marginLeft ?? 10;
+  const marginRight = settings.marginRight ?? 10;
+
   return {
-    pageWidth: Math.round(widthMm * MM_TO_VRV_UNIT),
-    pageHeight: Math.round(heightMm * MM_TO_VRV_UNIT),
-    pageMarginTop: Math.round(settings.marginTopMm * MM_TO_VRV_UNIT),
-    pageMarginBottom: Math.round(settings.marginBottomMm * MM_TO_VRV_UNIT),
-    pageMarginLeft: Math.round(settings.marginLeftMm * MM_TO_VRV_UNIT),
-    pageMarginRight: Math.round(settings.marginRightMm * MM_TO_VRV_UNIT),
-    scale: Math.round(settings.notationScalePercent),
-    // Do not use scaleToPageSize here. It can shrink the entire score to
-    // minimize the number of pages, which is the opposite of the engraver
-    // behavior we want. The score should keep its chosen notation size and
-    // let Verovio create as many systems/pages as the page dimensions require.
+    pageWidth: mmToVerovio(page.width),
+    pageHeight: mmToVerovio(page.height),
+
+    pageMarginTop: mmToVerovio(marginTop),
+    pageMarginBottom: mmToVerovio(marginBottom),
+    pageMarginLeft: mmToVerovio(marginLeft),
+    pageMarginRight: mmToVerovio(marginRight),
+
+    scale: Math.round(settings.notationScalePercent ?? 100),
+
+    // We determine the notation scale ourselves. Verovio should not
+    // subsequently shrink the finished page to make it fit.
     scaleToPageSize: false,
-    // Keep each page to one system. Verovio's automatic system layout will
-    // fit the system horizontally rather than truncating its staves.
+
+    // One musical system per page.
     systemMaxPerPage: 1,
-    // Never let Verovio's internal shrink-to-fit run. It rescales an
-    // overflowing system's width along with its height, *after*
-    // justification already stretched that system to fill the page — the
-    // exact mechanism that was leaving ragged/empty margins. We derive the
-    // right scale ourselves in findAutoFitScale, with real layouts, before
-    // committing to a production render, so this is never needed as a
-    // fallback and must stay off so it can't quietly override our result.
+
     shrinkToFit: false,
-    justifyVertically: false,
+
+    // Keep horizontal and vertical spacing predictable.
     spacingLinear: settings.spacingLinear ?? 0.25,
     spacingNonLinear: settings.spacingNonLinear ?? 0.6,
-    // systemMaxPerPage:1 means every system is "last on its page." Verovio
-    // only justifies a last system if its natural width already reaches
-    // minLastJustification (default 0.8 = 80%) of the page width. Force 0
-    // so every system stretches to fill the page regardless.
+
+    // Allow Verovio to use the available system width rather than forcing
+    // additional justification on the final system.
     minLastJustification: 0,
+
+    // Let Verovio determine automatic system/page breaks.
     breaks: "auto",
+
+    // Keep the requested page height rather than expanding it.
     adjustPageHeight: false,
+
+    // SVG output in millimeters.
     mmOutput: true,
+
+    // The application does not currently use Verovio-generated headers or
+    // footers.
     header: "none",
     footer: "none",
   };
 }
 
-/**
- * Applies the automatic one-system-per-page layout and auto-calculates 
- * the maximum scale that fits the vertical page limits.
- *
- * Requires a score to already be loaded (loadScore must run first).
- */
+export async function loadMusicXML(musicXml, settings) {
+  if (!toolkit) {
+    await initializeVerovio();
+  }
+
+  toolkit.loadData(musicXml);
+  toolkit.setOptions(buildVerovioOptions(settings));
+  toolkit.redoLayout();
+
+  return {
+    pageCount: toolkit.getPageCount(),
+  };
+}
+
+export function updateSettings(settings) {
+  if (!toolkit) {
+    throw new Error("No score is loaded yet.");
+  }
+
+  toolkit.setOptions(buildVerovioOptions(settings));
+  toolkit.redoLayout();
+
+  return {
+    pageCount: toolkit.getPageCount(),
+  };
+}
+
+export function renderPage(pageNumber) {
+  if (!toolkit) {
+    throw new Error("No score is loaded yet.");
+  }
+
+  return toolkit.renderToSVG(pageNumber);
+}
+
+export function getPageCount() {
+  if (!toolkit) {
+    throw new Error("No score is loaded yet.");
+  }
+
+  return toolkit.getPageCount();
+}
+
 export function findAutoFitScale(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
 
-  const targetHeight = buildVerovioOptions(settings).pageHeight;
-  const viewBoxPattern = /viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/;
+  const baseOptions = buildVerovioOptions(settings);
+  const targetHeight =
+    baseOptions.pageHeight -
+    baseOptions.pageMarginTop -
+    baseOptions.pageMarginBottom;
 
-  // Renders the WHOLE score at a candidate scale, using the real target
-  // page height and shrinkToFit OFF, and checks whether every system
-  // actually fits. This is the true final cast-off at that exact scale —
-  // not an estimate borrowed from a different scale's layout — because
-  // which measures land on which system shifts depending on scale, so a
-  // number extrapolated from one layout doesn't reliably predict another.
-  // Checking the real thing is the only way to be sure Verovio's internal
-  // shrinkToFit (which quietly squashes width too, after justification
-  // already ran) never has a reason to kick in later.
+  const viewBoxPattern =
+    /viewBox="[\d\.\s\-]+ [\d\.\s\-]+ [\d\.\s\-]+ ([\d\.]+)"/;
+
+  // The scale must be chosen before Verovio decides where to put system
+  // breaks. A normal layout cannot answer that question: changing scale
+  // changes horizontal measure widths, which changes the measures assigned to
+  // each system, which changes the resulting pages.
+  //
+  // Instead, the fitting pass deliberately asks Verovio for ONE system
+  // containing the entire score. With breaks="none", Verovio lays the music
+  // out as one continuous system and automatically makes the page wide enough
+  // for it. The system's vertical height is therefore determined by the
+  // number of staves (and their vertical content), rather than by an arbitrary
+  // set of measures that happened to be cast off onto a page first.
+  //
+  // Once the largest scale that fits vertically has been found, the final
+  // layout is run normally with breaks="auto" and systemMaxPerPage: 1. At
+  // that point Verovio can use the full page width to pack as many measures as
+  // possible into each system at the already-established notation size.
   function fitsAtScale(candidateScale) {
-    const options = buildVerovioOptions({ ...settings, notationScalePercent: candidateScale });
+    const options = {
+      ...baseOptions,
+      scale: Math.round(candidateScale),
+
+      // Temporarily suppress system/page breaking. Verovio produces a single
+      // system and expands the page width as necessary, letting us measure the
+      // vertical cost of the complete staff stack before cast-off.
+      //
+      // Use a very tall temporary page and adjustPageHeight so the SVG height
+      // becomes the actual content height rather than the configured page
+      // height. Remove the page's vertical margins during this measurement;
+      // they are accounted for in targetHeight above and are restored for the
+      // final render.
+      breaks: "none",
+      pageHeight: 60000,
+      pageMarginTop: 0,
+      pageMarginBottom: 0,
+      adjustPageHeight: true,
+    };
+
     toolkit.setOptions(options);
     toolkit.redoLayout();
-    const pageCount = toolkit.getPageCount();
-    for (let page = 1; page <= pageCount; page++) {
-      const svg = toolkit.renderToSVG(page);
-      const match = svg.match(viewBoxPattern);
-      const height = match && match[1] ? parseFloat(match[1]) : 0;
-      // Small safety margin against floating-point rounding at the edge.
-      if (height > targetHeight * 0.995) return false;
-    }
-    return true;
+
+    const svg = toolkit.renderToSVG(1);
+    const match = svg.match(viewBoxPattern);
+    const height = match && match[1] ? parseFloat(match[1]) : 0;
+
+    if (!height) return false;
+
+    // Small safety margin against floating-point rounding at the edge.
+    return height <= targetHeight * 0.995;
   }
 
-  // Binary search the largest integer scale (1–200%) whose real layout
-  // fits every page without needing any internal shrink.
+  // Binary search the largest integer scale (1–200%) whose single-system
+  // layout fits vertically inside the usable page area. This is deliberately
+  // independent of the eventual horizontal system/page breaks.
   let lo = 1;
   let hi = 200;
   let best = 1;
+
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
+
     if (fitsAtScale(mid)) {
       best = mid;
       lo = mid + 1;
@@ -190,9 +227,16 @@ export function findAutoFitScale(settings) {
     }
   }
 
-  // Final real render at the verified-fitting scale. shrinkToFit is off
-  // (see buildVerovioOptions) so nothing can silently override this result.
-  const finalSettings = { ...settings, notationScalePercent: best };
+  // Final real render at the verified-fitting scale. Restore normal
+  // automatic system breaking so Verovio can pack the maximum number of
+  // measures horizontally at this scale. shrinkToFit remains off: it should
+  // never be needed because the scale was selected from the complete staff
+  // stack before the cast-off was performed.
+  const finalSettings = {
+    ...settings,
+    notationScalePercent: best,
+  };
+
   toolkit.setOptions(buildVerovioOptions(finalSettings));
   toolkit.redoLayout();
 
@@ -200,48 +244,4 @@ export function findAutoFitScale(settings) {
     scale: best,
     pageCount: toolkit.getPageCount(),
   };
-}
-
-/**
- * Loads MusicXML (or MEI, ABC, etc. — Verovio auto-detects) text into
- * the toolkit with the given engraving settings, and returns the
- * resulting page count. Throws a plain Error with a user-safe message
- * on failure — callers should not need to inspect internals.
- */
-export async function loadScore(musicXmlText, settings) {
-  const tk = await getToolkit();
-  tk.setOptions(buildVerovioOptions(settings));
-
-  let loaded;
-  try {
-    loaded = tk.loadData(musicXmlText);
-  } catch (err) {
-    throw new Error("Verovio could not parse this file's musical content.");
-  }
-
-  if (!loaded) {
-    throw new Error(
-      "This file doesn't look like valid MusicXML (or another format Verovio understands)."
-    );
-  }
-
-  const pageCount = tk.getPageCount();
-  if (!pageCount || pageCount < 1) {
-    throw new Error("The file loaded, but no pages of music were produced.");
-  }
-  return pageCount;
-}
-
-/** Re-applies settings and re-runs layout on the already-loaded score. */
-export function updateSettings(settings) {
-  if (!toolkit) throw new Error("No score is loaded yet.");
-  toolkit.setOptions(buildVerovioOptions(settings));
-  toolkit.redoLayout();
-  return toolkit.getPageCount();
-}
-
-/** Renders a single 1-indexed page to an SVG string. */
-export function renderPage(pageNumber) {
-  if (!toolkit) throw new Error("No score is loaded yet.");
-  return toolkit.renderToSVG(pageNumber);
 }
