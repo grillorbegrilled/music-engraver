@@ -57,8 +57,8 @@ export function preprocessMusicXml(xmlText) {
  * repeat is meant to run through the end of the part. But Verovio's
  * importer doesn't reset that "repeat is open" state at the part
  * boundary, so it leaks into the *next* part in the file. Real, fully
- * notated measures in that next part then get rendered as
- * repeat-measure glyphs instead of their actual content.
+ * notated measures in that next part then get rendered as repeat-
+ * measure glyphs instead of their actual content.
  *
  * Fix: for every <part>, track measure-repeat start/stop per staff
  * number (the "number" attribute on <measure-style>, when a part has
@@ -78,6 +78,13 @@ export function preprocessMusicXml(xmlText) {
  * @param {Document} doc
  * @returns {number} number of stops inserted
  */
+function createMusicXmlElement(doc, name) {
+  const namespace = doc.documentElement && doc.documentElement.namespaceURI;
+  return namespace
+    ? doc.createElementNS(namespace, name)
+    : doc.createElement(name);
+}
+
 function fixUnterminatedMeasureRepeats(doc) {
   let fixes = 0;
   const parts = Array.from(doc.getElementsByTagName("part"));
@@ -93,15 +100,22 @@ function fixUnterminatedMeasureRepeats(doc) {
     const openStaves = new Set();
 
     for (const measure of measures) {
-      const styles = Array.from(measure.getElementsByTagName("measure-style"));
+      const styles = Array.from(
+        measure.getElementsByTagName("measure-style")
+      );
+
       for (const style of styles) {
         const repeat = style.getElementsByTagName("measure-repeat")[0];
         if (!repeat) continue;
 
         const key = style.getAttribute("number") || "_default";
         const type = repeat.getAttribute("type");
-        if (type === "start") openStaves.add(key);
-        else if (type === "stop") openStaves.delete(key);
+
+        if (type === "start") {
+          openStaves.add(key);
+        } else if (type === "stop") {
+          openStaves.delete(key);
+        }
       }
     }
 
@@ -136,6 +150,9 @@ function fixUnterminatedMeasureRepeats(doc) {
  * as the first element of `measure`. Reuses an existing leading
  * <attributes> element if the measure already starts with one, so
  * divisions/clef/key/etc. declared there are left untouched.
+ *
+ * If a matching measure-style already exists, reuse it instead of
+ * creating a second one.
  */
 function insertMeasureRepeatStop(doc, measure, key) {
   const firstChild = measure.firstElementChild;
@@ -144,27 +161,55 @@ function insertMeasureRepeatStop(doc, measure, key) {
   if (firstChild && firstChild.tagName === "attributes") {
     attributes = firstChild;
   } else {
-    attributes = doc.createElement("attributes");
-    
+    attributes = createMusicXmlElement(doc, "attributes");
+
     // Skip layout tags to avoid breaking Verovio's DTD parsing sequence
     let insertBeforeNode = measure.firstElementChild;
     const layoutTags = ["print", "bookmark", "direction"];
-    
-    while (insertBeforeNode && layoutTags.includes(insertBeforeNode.tagName)) {
+
+    while (
+      insertBeforeNode &&
+      layoutTags.includes(insertBeforeNode.tagName)
+    ) {
       insertBeforeNode = insertBeforeNode.nextElementSibling;
     }
-    
+
     measure.insertBefore(attributes, insertBeforeNode);
   }
 
-  const style = doc.createElement("measure-style");
-  if (key !== "_default") style.setAttribute("number", key);
+  // Reuse a matching <measure-style> if one already exists.
+  // MusicXML permits multiple measure-style elements, but keeping the
+  // stop in the existing matching style is safer for Verovio's importer.
+  const styles = Array.from(
+    attributes.getElementsByTagName("measure-style")
+  );
 
-  const repeat = doc.createElement("measure-repeat");
+  let style = styles.find(
+    (candidate) =>
+      (candidate.getAttribute("number") || "_default") === key
+  );
+
+  if (!style) {
+    style = createMusicXmlElement(doc, "measure-style");
+
+    if (key !== "_default") {
+      style.setAttribute("number", key);
+    }
+
+    attributes.appendChild(style);
+  }
+
+  // Don't insert a duplicate stop if one is already present.
+  const existingRepeat = Array.from(
+    style.getElementsByTagName("measure-repeat")
+  ).find((repeat) => repeat.getAttribute("type") === "stop");
+
+  if (existingRepeat) return;
+
+  const repeat = createMusicXmlElement(doc, "measure-repeat");
   repeat.setAttribute("type", "stop");
 
   style.appendChild(repeat);
-  attributes.appendChild(style);
 }
 
 /**
@@ -196,13 +241,23 @@ function fixZBuzzRollDirections(doc) {
 
     // Advanced search for the next actual <note> element in the parent
     let sibling = direction.nextElementSibling;
+
     while (sibling && sibling.tagName !== "note") {
-      // Stop early if we hit another direction or measure boundary to avoid misattributing
-      if (sibling.tagName === "direction" || sibling.tagName === "measure") break;
+      // Stop early if we hit another direction or measure boundary to
+      // avoid misattributing the direction.
+      if (
+        sibling.tagName === "direction" ||
+        sibling.tagName === "measure"
+      ) {
+        break;
+      }
+
       sibling = sibling.nextElementSibling;
     }
-    
-    const note = (sibling && sibling.tagName === "note") ? sibling : null;
+
+    const note =
+      sibling && sibling.tagName === "note" ? sibling : null;
+
     if (!note) continue; // nothing to attach the roll to — leave it in place
 
     addUnmeasuredTremolo(doc, note);
@@ -221,12 +276,18 @@ function fixZBuzzRollDirections(doc) {
  * this check instead of being treated as a match.
  */
 function isZOnlyDirection(direction) {
-  const directionTypes = Array.from(direction.getElementsByTagName("direction-type"));
+  const directionTypes = Array.from(
+    direction.getElementsByTagName("direction-type")
+  );
+
   if (directionTypes.length === 0) return false;
 
   let text = "";
+
   for (const directionType of directionTypes) {
-    for (const words of Array.from(directionType.getElementsByTagName("words"))) {
+    for (const words of Array.from(
+      directionType.getElementsByTagName("words")
+    )) {
       text += words.textContent;
     }
   }
@@ -246,29 +307,47 @@ function isZOnlyDirection(direction) {
 function addUnmeasuredTremolo(doc, note) {
   const children = Array.from(note.children);
 
-  let notations = children.find((el) => el.tagName === "notations");
+  let notations = children.find(
+    (el) => el.tagName === "notations"
+  );
+
   if (!notations) {
-    notations = doc.createElement("notations");
+    notations = createMusicXmlElement(doc, "notations");
+
     const lyric = children.find((el) => el.tagName === "lyric");
+
     note.insertBefore(notations, lyric || null); // insertBefore(x, null) appends
   }
 
-  let ornaments = Array.from(notations.children).find((el) => el.tagName === "ornaments");
+  let ornaments = Array.from(notations.children).find(
+    (el) => el.tagName === "ornaments"
+  );
+
   if (!ornaments) {
-    ornaments = doc.createElement("ornaments");
-    
-    // Insert <ornaments> accurately in the DTD sequence rather than appending to the end
+    ornaments = createMusicXmlElement(doc, "ornaments");
+
+    // Insert <ornaments> accurately in the DTD sequence rather than
+    // appending to the end.
     let insertBeforeNode = notations.firstElementChild;
-    const skipTags = ["tied", "slur", "tuplet", "glissando", "slide"];
-    
-    while (insertBeforeNode && skipTags.includes(insertBeforeNode.tagName)) {
+    const skipTags = [
+      "tied",
+      "slur",
+      "tuplet",
+      "glissando",
+      "slide"
+    ];
+
+    while (
+      insertBeforeNode &&
+      skipTags.includes(insertBeforeNode.tagName)
+    ) {
       insertBeforeNode = insertBeforeNode.nextElementSibling;
     }
-    
+
     notations.insertBefore(ornaments, insertBeforeNode);
   }
 
-  const tremolo = doc.createElement("tremolo");
+  const tremolo = createMusicXmlElement(doc, "tremolo");
   tremolo.setAttribute("type", "unmeasured");
   ornaments.appendChild(tremolo);
 }
@@ -306,26 +385,44 @@ function fixComposerArrangerCredit(doc) {
   const identification = doc.getElementsByTagName("identification")[0];
   if (!identification) return 0;
 
-  const creators = Array.from(identification.getElementsByTagName("creator"));
-  const composer = creators.find((c) => (c.getAttribute("type") || "").toLowerCase() === "composer");
-  const arranger = creators.find((c) => (c.getAttribute("type") || "").toLowerCase() === "arranger");
-  if (!composer && !arranger) return 0; // nothing in the shape this fixer targets
+  const creators = Array.from(
+    identification.getElementsByTagName("creator")
+  );
+
+  const composer = creators.find(
+    (c) =>
+      (c.getAttribute("type") || "").toLowerCase() === "composer"
+  );
+
+  const arranger = creators.find(
+    (c) =>
+      (c.getAttribute("type") || "").toLowerCase() === "arranger"
+  );
+
+  if (!composer && !arranger) return 0;
 
   const lines = [];
-  if (composer) lines.push(`by ${composer.textContent.trim()}`);
-  if (arranger) lines.push(`arr. ${arranger.textContent.trim()}`);
+
+  if (composer) {
+    lines.push(`by ${composer.textContent.trim()}`);
+  }
+
+  if (arranger) {
+    lines.push(`arr. ${arranger.textContent.trim()}`);
+  }
 
   if (composer) identification.removeChild(composer);
   if (arranger) identification.removeChild(arranger);
 
-  const credit = doc.createElement("credit");
-  const creditType = doc.createElement("credit-type");
+  const credit = createMusicXmlElement(doc, "credit");
+  const creditType = createMusicXmlElement(doc, "credit-type");
+
   creditType.textContent = "composer";
   credit.appendChild(creditType);
 
-  // Provide separated <credit-words> tags instead of raw newlines 
+  // Provide separated <credit-words> tags instead of raw newlines.
   for (const line of lines) {
-    const creditWords = doc.createElement("credit-words");
+    const creditWords = createMusicXmlElement(doc, "credit-words");
     creditWords.textContent = line;
     credit.appendChild(creditWords);
   }
@@ -334,8 +431,13 @@ function fixComposerArrangerCredit(doc) {
   // content model, after <identification>/<defaults> and any other
   // credits (title, subtitle, etc.) that are already there.
   const scorePartwise = doc.documentElement;
-  const partList = scorePartwise.getElementsByTagName("part-list")[0];
-  scorePartwise.insertBefore(credit, partList || null); // insertBefore(x, null) appends
+  const partList =
+    scorePartwise.getElementsByTagName("part-list")[0];
+
+  scorePartwise.insertBefore(
+    credit,
+    partList || null
+  ); // insertBefore(x, null) appends
 
   return 1;
 }
