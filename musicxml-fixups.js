@@ -15,7 +15,7 @@
  * new fixers here as new Verovio import quirks turn up — that's the
  * whole extension point for this file.
  */
-const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections];
+const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections, fixComposerArrangerCredit];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -252,4 +252,66 @@ function addUnmeasuredTremolo(doc, note) {
   const tremolo = doc.createElement("tremolo");
   tremolo.setAttribute("type", "unmeasured");
   ornaments.appendChild(tremolo);
+}
+
+/**
+ * Verovio import quirk: it only prints composer/arranger text on the
+ * rendered page when it comes from a <credit> block with a matching
+ * <credit-type> — the same mechanism it already uses for title and
+ * subtitle (both present as <credit> in this file and both render
+ * fine). Composer/arranger info stored only in
+ * <identification><creator type="composer|arranger"> — which is
+ * exactly how tools like Flat.io export it — is read into score
+ * *metadata* but never makes it onto the page.
+ *
+ * Fix: pull the composer/arranger names out of <identification>,
+ * delete those <creator> elements, and write a single new
+ *   <credit>
+ *     <credit-type>composer</credit-type>
+ *     <credit-words>by {composer}\narr. {arranger}</credit-words>
+ *   </credit>
+ * in their place (inserted before <part-list>, alongside the other
+ * credits, per the MusicXML element order). No default-x/default-y
+ * is set — Verovio positions standard credit types (title, composer,
+ * etc.) itself, and pinning coordinates here would just fight that.
+ *
+ * A missing composer or arranger degrades gracefully: whichever one
+ * exists still gets its own line ("by ..." / "arr. ..."); if neither
+ * exists there's nothing to do.
+ *
+ * @param {Document} doc
+ * @returns {number} 1 if a composer/arranger credit was rewritten, 0 otherwise
+ */
+function fixComposerArrangerCredit(doc) {
+  const identification = doc.getElementsByTagName("identification")[0];
+  if (!identification) return 0;
+
+  const creators = Array.from(identification.getElementsByTagName("creator"));
+  const composer = creators.find((c) => (c.getAttribute("type") || "").toLowerCase() === "composer");
+  const arranger = creators.find((c) => (c.getAttribute("type") || "").toLowerCase() === "arranger");
+  if (!composer && !arranger) return 0; // nothing in the shape this fixer targets
+
+  const lines = [];
+  if (composer) lines.push(`by ${composer.textContent.trim()}`);
+  if (arranger) lines.push(`arr. ${arranger.textContent.trim()}`);
+
+  if (composer) identification.removeChild(composer);
+  if (arranger) identification.removeChild(arranger);
+
+  const credit = doc.createElement("credit");
+  const creditType = doc.createElement("credit-type");
+  creditType.textContent = "composer";
+  const creditWords = doc.createElement("credit-words");
+  creditWords.textContent = lines.join("\n");
+  credit.appendChild(creditType);
+  credit.appendChild(creditWords);
+
+  // <credit>* comes right before <part-list> in score-partwise's
+  // content model, after <identification>/<defaults> and any other
+  // credits (title, subtitle, etc.) that are already there.
+  const scorePartwise = doc.documentElement;
+  const partList = scorePartwise.getElementsByTagName("part-list")[0];
+  scorePartwise.insertBefore(credit, partList || null); // insertBefore(x, null) appends
+
+  return 1;
 }
