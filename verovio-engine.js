@@ -7,6 +7,8 @@
 // Verovio is loaded from jsDelivr at runtime (not bundled), because this
 // project has no build step. See README-spike.md for why.
 
+import { preprocessMusicXml } from "./musicxml-fixups.js";
+
 const VEROVIO_SCRIPT_URL =
   "https://cdn.jsdelivr.net/npm/verovio@5.2.0/dist/verovio-toolkit-wasm.js";
 
@@ -140,9 +142,11 @@ export async function loadScore(musicXmlText, settings) {
   const tk = await getToolkit();
   tk.setOptions(buildVerovioOptions(settings));
 
+  const patchedXmlText = preprocessMusicXml(musicXmlText);
+
   let loaded;
   try {
-    loaded = tk.loadData(musicXmlText);
+    loaded = tk.loadData(patchedXmlText);
   } catch (err) {
     throw new Error("Verovio could not parse this file's musical content.");
   }

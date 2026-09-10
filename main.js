@@ -279,23 +279,6 @@ fileInput.addEventListener("change", () => {
   if (file) handleFile(file);
 });
 
-// Drag and drop onto the score area.
-scoreArea.addEventListener("dragover", (event) => {
-  event.preventDefault();
-  scoreArea.classList.add("drag-over");
-});
-
-scoreArea.addEventListener("dragleave", () => {
-  scoreArea.classList.remove("drag-over");
-});
-
-scoreArea.addEventListener("drop", (event) => {
-  event.preventDefault();
-  scoreArea.classList.remove("drag-over");
-  const file = event.dataTransfer.files[0];
-  if (file) handleFile(file);
-});
-
 // -- settings changes -----------------------------------------------------
 
 function debounce(fn, delayMs) {
