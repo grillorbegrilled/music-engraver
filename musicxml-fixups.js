@@ -137,7 +137,6 @@ function fixUnterminatedMeasureRepeats(doc) {
 
   return fixes;
 }
-
 /**
  * Inserts:
  *   <attributes>
@@ -145,21 +144,39 @@ function fixUnterminatedMeasureRepeats(doc) {
  *       <measure-repeat type="stop"/>
  *     </measure-style>
  *   </attributes>
- * as the first element of `measure`. Reuses an existing leading
- * <attributes> element if the measure already starts with one, so
- * divisions/clef/key/etc. declared there are left untouched.
+ * into `measure`, positioned to actually survive Verovio's importer.
+ *
+ * This is NOT just "the first element of the measure" — that was the
+ * original (broken) approach. Verovio has a separate pre-pass,
+ * ReadMusicXmlPartAttributesAsStaffDef, that runs on each part's
+ * *first* measure before any notes are read, to build the staff
+ * definition. It walks that measure's leading run of
+ * attributes/barline/print/sound elements — and while doing so it
+ * renames every <attributes> tag it touches to <mei-read>, precisely
+ * so the real note-reading pass skips it later. A stop placed inside
+ * that leading block (reused or newly inserted as the first child)
+ * gets renamed away before Verovio's measure-repeat handling ever
+ * sees it — so it's silently discarded, and the leaked repeat state
+ * keeps bleeding through.
+ *
+ * The fix is positional: find the first child of `measure` that is
+ * NOT one of attributes/barline/print/sound (almost always the first
+ * <note>) — that's exactly where the StaffDef sweep stops looking —
+ * and insert a fresh <attributes> right after it. Anything past that
+ * point is untouched by the sweep, so this one keeps its real tag
+ * name and gets processed normally.
+ *
+ * A second, separate <attributes> element later in a measure is
+ * ordinary, legal MusicXML (mid-measure attribute changes use exactly
+ * this pattern), so this doesn't touch or reuse whatever attributes
+ * the measure already declares up front.
  */
 function insertMeasureRepeatStop(doc, measure, key) {
-  const firstChild = measure.firstElementChild;
-  let attributes;
+  const sweepExempt = new Set(["attributes", "barline", "print", "sound"]);
+  const children = Array.from(measure.children);
+  const firstNonSwept = children.find((el) => !sweepExempt.has(el.tagName));
 
-  if (firstChild && firstChild.tagName === "attributes") {
-    attributes = firstChild;
-  } else {
-    attributes = doc.createElement("attributes");
-    measure.insertBefore(attributes, firstChild);
-  }
-
+  const attributes = doc.createElement("attributes");
   const style = doc.createElement("measure-style");
   if (key !== "_default") style.setAttribute("number", key);
 
@@ -168,6 +185,11 @@ function insertMeasureRepeatStop(doc, measure, key) {
 
   style.appendChild(repeat);
   attributes.appendChild(style);
+
+  // insertBefore(x, null) appends — covers the (rare) case of a
+  // measure that's entirely attributes/barline/print/sound with no
+  // real content at all.
+  measure.insertBefore(attributes, firstNonSwept ? firstNonSwept.nextElementSibling : null);
 }
 
 /**
