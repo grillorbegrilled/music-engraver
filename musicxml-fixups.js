@@ -62,10 +62,18 @@ export function preprocessMusicXml(xmlText) {
  *
  * Fix: for every <part>, track measure-repeat start/stop per staff
  * number (the "number" attribute on <measure-style>, when a part has
- * more than one staff). Any repeat still open when the part ends gets
- * an explicit <measure-repeat type="stop"/> inserted into that part's
- * last measure, so Verovio closes it out before moving to the next
- * part instead of leaving it open indefinitely.
+ * more than one staff).
+ *
+ * Important: the fix must NOT touch the affected part's own last
+ * measure. A <measure-repeat type="stop"/> marks "the first measure
+ * where the repeat is no longer displayed" — inserting one there
+ * would correctly stop the leak, but also flip that part's own last
+ * measure from the repeat glyph over to its literal written-out
+ * notes, which changes how the originating part looks. Instead, the
+ * reset gets inserted into the *next* part's first measure: it clears
+ * Verovio's carried-over flag before that part's real notes are
+ * processed, without altering anything about the part that actually
+ * owns the repeat.
  *
  * @param {Document} doc
  * @returns {number} number of stops inserted
@@ -74,7 +82,8 @@ function fixUnterminatedMeasureRepeats(doc) {
   let fixes = 0;
   const parts = Array.from(doc.getElementsByTagName("part"));
 
-  for (const part of parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
     const measures = Array.from(part.getElementsByTagName("measure"));
     if (measures.length === 0) continue;
 
@@ -98,9 +107,18 @@ function fixUnterminatedMeasureRepeats(doc) {
 
     if (openStaves.size === 0) continue;
 
-    const lastMeasure = measures[measures.length - 1];
+    // This part ends with the repeat still open. Legal by spec, but
+    // it's exactly the state Verovio fails to reset at the part
+    // boundary. Neutralize it in whatever part comes next, so it
+    // can't bleed into real notation — leaving this part untouched.
+    const nextPart = parts[i + 1];
+    if (!nextPart) continue; // last part in the file — nothing downstream to protect
+
+    const nextMeasures = nextPart.getElementsByTagName("measure");
+    if (nextMeasures.length === 0) continue;
+
     for (const key of openStaves) {
-      insertMeasureRepeatStop(doc, lastMeasure, key);
+      insertMeasureRepeatStop(doc, nextMeasures[0], key);
       fixes++;
     }
   }
