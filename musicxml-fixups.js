@@ -15,7 +15,8 @@
  * new fixers here as new Verovio import quirks turn up — that's the
  * whole extension point for this file.
  */
-const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections];
+const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
+               fixBassDrumNoteheads];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -286,5 +287,114 @@ function addUnmeasuredTremolo(doc, note) {
   const tremolo = doc.createElement("tremolo");
   tremolo.setAttribute("type", "unmeasured");
   ornaments.appendChild(tremolo);
+}
+
+/**
+ * Percussion notation workaround: notes in the bass drum part that use
+ * slash or x noteheads need an explicit unpitched display position so
+ * Verovio places them on the intended staff position.
+ *
+ * Fix: locate the <part> whose corresponding <score-part>/<part-name>
+ * contains "bass drum" (case insensitive), then only within that part,
+ * find notes whose <notehead> is "slash" or "x". Set their unpitched
+ * display position to B4.
+ *
+ * Important: only the matching bass drum part is inspected. No notes in
+ * any other part are modified.
+ *
+ * @param {Document} doc
+ * @returns {number} number of notes changed
+ */
+function fixBassDrumNoteheads(doc) {
+  let fixes = 0;
+
+  // MusicXML identifies a <part> by its id, while the human-readable
+  // instrument name lives in the corresponding <score-part>/<part-name>.
+  const scoreParts = Array.from(doc.getElementsByTagName("score-part"));
+
+  const bassDrumPartIds = new Set();
+
+  for (const scorePart of scoreParts) {
+    const partName = scorePart.getElementsByTagName("part-name")[0];
+    if (!partName) continue;
+
+    if (partName.textContent.toLowerCase().includes("bass drum")) {
+      const id = scorePart.getAttribute("id");
+      if (id) bassDrumPartIds.add(id);
+    }
+  }
+
+  if (bassDrumPartIds.size === 0) return 0;
+
+  // Only inspect <part> elements whose id corresponds to a matching
+  // <score-part>. This deliberately prevents the fixer from touching
+  // similarly notated notes in other instruments.
+  const parts = Array.from(doc.getElementsByTagName("part"));
+
+  for (const part of parts) {
+    if (!bassDrumPartIds.has(part.getAttribute("id"))) continue;
+
+    const notes = Array.from(part.getElementsByTagName("note"));
+
+    for (const note of notes) {
+      const notehead = Array.from(note.children).find(
+        (el) => el.tagName === "notehead"
+      );
+
+      if (!notehead) continue;
+
+      const value = notehead.textContent.trim().toLowerCase();
+      if (value !== "slash" && value !== "x") continue;
+
+      setBassDrumDisplayPosition(doc, note);
+      fixes++;
+    }
+  }
+
+  return fixes;
+}
+
+/**
+ * Sets the note's <unpitched> display position to B4.
+ *
+ * Existing <unpitched> elements are reused. If one does not exist,
+ * a correctly positioned one is created before <duration>.
+ */
+function setBassDrumDisplayPosition(doc, note) {
+  let unpitched = Array.from(note.children).find(
+    (el) => el.tagName === "unpitched"
+  );
+
+  if (!unpitched) {
+    unpitched = doc.createElement("unpitched");
+
+    const duration = Array.from(note.children).find(
+      (el) => el.tagName === "duration"
+    );
+
+    note.insertBefore(unpitched, duration || null);
+  }
+
+  let displayStep = Array.from(unpitched.children).find(
+    (el) => el.tagName === "display-step"
+  );
+
+  if (!displayStep) {
+    displayStep = doc.createElement("display-step");
+    unpitched.appendChild(displayStep);
+  }
+
+  displayStep.textContent = "B";
+
+  let displayOctave = Array.from(unpitched.children).find(
+    (el) => el.tagName === "display-octave"
+  );
+
+  if (!displayOctave) {
+    displayOctave = doc.createElement("display-octave");
+    unpitched.appendChild(displayOctave);
+  }
+
+  displayOctave.textContent = "4";
 }
 
