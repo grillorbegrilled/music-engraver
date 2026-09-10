@@ -15,7 +15,7 @@
  * new fixers here as new Verovio import quirks turn up — that's the
  * whole extension point for this file.
  */
-const FIXERS = [fixUnterminatedMeasureRepeats];
+const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -156,4 +156,100 @@ function insertMeasureRepeatStop(doc, measure, key) {
 
   style.appendChild(repeat);
   attributes.appendChild(style);
+}
+
+/**
+ * Percussion shorthand: a <direction> whose words say only "z" (case
+ * insensitive, whitespace trimmed) is a buzz-roll marking written as
+ * text instead of notation — the composer/arranger's way of saying
+ * "unmeasured tremolo on the next note." Verovio doesn't understand
+ * that convention, so it just renders a floating "z" above the staff
+ * and the note itself keeps looking like a plain single hit.
+ *
+ * Fix: for every such <direction>, find the <note> immediately
+ * following it, attach a proper
+ *   <notations><ornaments><tremolo type="unmeasured"/></ornaments></notations>
+ * (the MusicXML 4.0 encoding of a buzz roll / unmeasured tremolo —
+ * Verovio and other renderers draw the standard buzz-roll glyph for
+ * this by default), then delete the now-redundant <direction>.
+ *
+ * Only direct next-sibling notes are treated as "immediately
+ * following" — if a direction isn't directly followed by a <note>
+ * element, it's left alone rather than guessed at.
+ *
+ * @param {Document} doc
+ * @returns {number} number of "z" directions converted
+ */
+function fixZBuzzRollDirections(doc) {
+  let fixes = 0;
+
+  // Snapshot into a plain array first: getElementsByTagName returns a
+  // live collection, and removing a <direction> from the document
+  // while iterating that collection would shift indices and skip
+  // elements.
+  const directions = Array.from(doc.getElementsByTagName("direction"));
+
+  for (const direction of directions) {
+    if (!isZOnlyDirection(direction)) continue;
+
+    const note = direction.nextElementSibling;
+    if (!note || note.tagName !== "note") continue; // nothing to attach the roll to — leave it in place
+
+    addUnmeasuredTremolo(doc, note);
+    direction.parentNode.removeChild(direction);
+    fixes++;
+  }
+
+  return fixes;
+}
+
+/**
+ * True if every <words> element inside `direction`'s <direction-type>
+ * children combines (trimmed, case-insensitive) to exactly "z". Other
+ * direction-type content (dynamics, wedges, etc.) contributes no text
+ * here, so a direction mixing "z" with anything else correctly fails
+ * this check instead of being treated as a match.
+ */
+function isZOnlyDirection(direction) {
+  const directionTypes = Array.from(direction.getElementsByTagName("direction-type"));
+  if (directionTypes.length === 0) return false;
+
+  let text = "";
+  for (const directionType of directionTypes) {
+    for (const words of Array.from(directionType.getElementsByTagName("words"))) {
+      text += words.textContent;
+    }
+  }
+
+  return text.trim().toUpperCase() === "Z";
+}
+
+/**
+ * Attaches a buzz-roll (unmeasured tremolo) ornament to `note`,
+ * respecting MusicXML's content model instead of just appending:
+ * <notations> must come before any <lyric> elements on the note, so
+ * a new <notations> is inserted right before the first <lyric> when
+ * one exists. An existing <notations>/<ornaments> pair is reused so
+ * this doesn't clobber other notations (fermatas, articulations,
+ * etc.) already present on the note.
+ */
+function addUnmeasuredTremolo(doc, note) {
+  const children = Array.from(note.children);
+
+  let notations = children.find((el) => el.tagName === "notations");
+  if (!notations) {
+    notations = doc.createElement("notations");
+    const lyric = children.find((el) => el.tagName === "lyric");
+    note.insertBefore(notations, lyric || null); // insertBefore(x, null) appends
+  }
+
+  let ornaments = Array.from(notations.children).find((el) => el.tagName === "ornaments");
+  if (!ornaments) {
+    ornaments = doc.createElement("ornaments");
+    notations.appendChild(ornaments);
+  }
+
+  const tremolo = doc.createElement("tremolo");
+  tremolo.setAttribute("type", "unmeasured");
+  ornaments.appendChild(tremolo);
 }
