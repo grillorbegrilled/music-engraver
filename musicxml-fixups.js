@@ -145,7 +145,16 @@ function insertMeasureRepeatStop(doc, measure, key) {
     attributes = firstChild;
   } else {
     attributes = doc.createElement("attributes");
-    measure.insertBefore(attributes, firstChild);
+    
+    // Skip layout tags to avoid breaking Verovio's DTD parsing sequence
+    let insertBeforeNode = measure.firstElementChild;
+    const layoutTags = ["print", "bookmark", "direction"];
+    
+    while (insertBeforeNode && layoutTags.includes(insertBeforeNode.tagName)) {
+      insertBeforeNode = insertBeforeNode.nextElementSibling;
+    }
+    
+    measure.insertBefore(attributes, insertBeforeNode);
   }
 
   const style = doc.createElement("measure-style");
@@ -172,13 +181,6 @@ function insertMeasureRepeatStop(doc, measure, key) {
  * (the MusicXML 4.0 encoding of a buzz roll / unmeasured tremolo —
  * Verovio and other renderers draw the standard buzz-roll glyph for
  * this by default), then delete the now-redundant <direction>.
- *
- * Only direct next-sibling notes are treated as "immediately
- * following" — if a direction isn't directly followed by a <note>
- * element, it's left alone rather than guessed at.
- *
- * @param {Document} doc
- * @returns {number} number of "z" directions converted
  */
 function fixZBuzzRollDirections(doc) {
   let fixes = 0;
@@ -192,8 +194,16 @@ function fixZBuzzRollDirections(doc) {
   for (const direction of directions) {
     if (!isZOnlyDirection(direction)) continue;
 
-    const note = direction.nextElementSibling;
-    if (!note || note.tagName !== "note") continue; // nothing to attach the roll to — leave it in place
+    // Advanced search for the next actual <note> element in the parent
+    let sibling = direction.nextElementSibling;
+    while (sibling && sibling.tagName !== "note") {
+      // Stop early if we hit another direction or measure boundary to avoid misattributing
+      if (sibling.tagName === "direction" || sibling.tagName === "measure") break;
+      sibling = sibling.nextElementSibling;
+    }
+    
+    const note = (sibling && sibling.tagName === "note") ? sibling : null;
+    if (!note) continue; // nothing to attach the roll to — leave it in place
 
     addUnmeasuredTremolo(doc, note);
     direction.parentNode.removeChild(direction);
@@ -246,7 +256,16 @@ function addUnmeasuredTremolo(doc, note) {
   let ornaments = Array.from(notations.children).find((el) => el.tagName === "ornaments");
   if (!ornaments) {
     ornaments = doc.createElement("ornaments");
-    notations.appendChild(ornaments);
+    
+    // Insert <ornaments> accurately in the DTD sequence rather than appending to the end
+    let insertBeforeNode = notations.firstElementChild;
+    const skipTags = ["tied", "slur", "tuplet", "glissando", "slide"];
+    
+    while (insertBeforeNode && skipTags.includes(insertBeforeNode.tagName)) {
+      insertBeforeNode = insertBeforeNode.nextElementSibling;
+    }
+    
+    notations.insertBefore(ornaments, insertBeforeNode);
   }
 
   const tremolo = doc.createElement("tremolo");
@@ -268,7 +287,8 @@ function addUnmeasuredTremolo(doc, note) {
  * delete those <creator> elements, and write a single new
  *   <credit>
  *     <credit-type>composer</credit-type>
- *     <credit-words>by {composer}\narr. {arranger}</credit-words>
+ *     <credit-words>by {composer}</credit-words>
+ *     <credit-words>arr. {arranger}</credit-words>
  *   </credit>
  * in their place (inserted before <part-list>, alongside the other
  * credits, per the MusicXML element order). No default-x/default-y
@@ -301,10 +321,14 @@ function fixComposerArrangerCredit(doc) {
   const credit = doc.createElement("credit");
   const creditType = doc.createElement("credit-type");
   creditType.textContent = "composer";
-  const creditWords = doc.createElement("credit-words");
-  creditWords.textContent = lines.join("\n");
   credit.appendChild(creditType);
-  credit.appendChild(creditWords);
+
+  // Provide separated <credit-words> tags instead of raw newlines 
+  for (const line of lines) {
+    const creditWords = doc.createElement("credit-words");
+    creditWords.textContent = line;
+    credit.appendChild(creditWords);
+  }
 
   // <credit>* comes right before <part-list> in score-partwise's
   // content model, after <identification>/<defaults> and any other
