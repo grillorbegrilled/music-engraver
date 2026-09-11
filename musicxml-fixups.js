@@ -16,8 +16,7 @@
  * whole extension point for this file.
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
-               fixBassDrumNoteheads, fixCymbalNoteheads, fixAllRestMeasures,
-               fixMissingComposerCredit];
+               fixBassDrumNoteheads, fixCymbalNoteheads, fixAllRestMeasures];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -597,83 +596,38 @@ function fixAllRestMeasures(doc) {
 }
 
 /**
- * Missing composer credit workaround: with `header`/`footer` set to
- * "auto", Verovio builds the printed title/composer/etc. block from
- * MusicXML's <credit> elements — the page-layout data that says what
- * actually gets drawn on the page — not from <identification><creator>,
- * which is bibliographic/indexing metadata and isn't itself positioned
- * on the page. A file can have a perfectly correct
- * <creator type="composer"> and still print no composer line if there
- * is no <credit> whose <credit-type> is "composer" alongside it.
+ * Pulls the composer and rights/copyright text straight out of
+ * <identification> — the same fields the fixers above leave alone,
+ * since they're already stored the standard way. Used by main.js to
+ * feed score-overlay.js, which stamps this text directly onto the
+ * rendered SVG rather than relying on Verovio's own header/footer
+ * conversion (see score-overlay.js for why).
  *
- * This is a common gap in exported MusicXML: exporters that emit a
- * title/subtitle credit block sometimes still forget the matching
- * composer one, even though they got the semantic <creator> right.
+ * Never throws: unparseable or metadata-less input just yields nulls,
+ * same as a normal "nothing to add" result from any fixer here.
  *
- * Fix: if <identification> has a non-empty <creator type="composer">
- * and no existing <credit> is typed "composer", add one — bare, with
- * no position/style attributes, matching the shape of this pipeline's
- * own working title/subtitle credits. Verovio's auto layout places
- * recognized credit types (title, subtitle, composer, ...) itself;
- * explicit default-x/default-y/justify/valign attributes push it onto
- * a "manually positioned" conversion path instead, which is worth
- * avoiding here since it isn't how the rest of this file's credits
- * are encoded.
- *
- * Important: if a composer <credit> already exists, this is a no-op —
- * the file already stores the composer the way Verovio expects, and
- * the fixer won't touch or duplicate it.
- *
- * @param {Document} doc
- * @returns {number} 1 if a composer credit was added, 0 otherwise
+ * @param {string} xmlText
+ * @returns {{composer: string|null, rights: string|null}}
  */
-function fixMissingComposerCredit(doc) {
+export function extractScoreMetadata(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, "application/xml");
+
+  if (doc.getElementsByTagName("parsererror").length > 0) {
+    return { composer: null, rights: null };
+  }
+
   const creators = Array.from(doc.getElementsByTagName("creator"));
-  const composerCreator = creators.find(
+  const composerEl = creators.find(
     (el) => (el.getAttribute("type") || "").trim().toLowerCase() === "composer"
   );
-  if (!composerCreator) return 0; // no composer metadata to work from
+  const rightsEl = doc.getElementsByTagName("rights")[0];
 
-  const composerName = composerCreator.textContent.trim();
-  if (!composerName) return 0;
+  const composer = composerEl ? composerEl.textContent.trim() : "";
+  const rights = rightsEl ? rightsEl.textContent.trim() : "";
 
-  const creditTypes = Array.from(doc.getElementsByTagName("credit-type"));
-  const hasComposerCredit = creditTypes.some(
-    (el) => el.textContent.trim().toLowerCase() === "composer"
-  );
-  // Already stored the way Verovio expects — nothing to fix.
-  if (hasComposerCredit) return 0;
-
-  const root = doc.documentElement;
-
-  // Deliberately bare: no default-x/default-y/justify/valign. Working
-  // title/subtitle credits in exports from this pipeline carry no
-  // position or style attributes either — Verovio's auto layout picks
-  // placement purely from <credit-type>. Adding explicit coordinates
-  // sends it down a different ("manually positioned") conversion path,
-  // which is what broke title rendering on the first attempt at this
-  // fixer. Match the shape of what's already known to work.
-  const credit = doc.createElement("credit");
-
-  const creditType = doc.createElement("credit-type");
-  creditType.textContent = "composer";
-  credit.appendChild(creditType);
-
-  const words = doc.createElement("credit-words");
-  words.textContent = composerName;
-  credit.appendChild(words);
-
-  // <credit> is only legal as a direct child of <score-partwise> (or
-  // <score-timewise>), after <defaults> and before <part-list>. Some
-  // consumers (Verovio included) treat document order as a positional
-  // hint — e.g. "first credit is the title slot" — independent of what
-  // <credit-type> says. So append after any existing credits (title,
-  // subtitle, etc.) rather than inserting before them, to avoid
-  // reordering credits whose rendering already works. Insert right
-  // before <part-list>.
-  const rootChildren = Array.from(root.children);
-  const partList = rootChildren.find((el) => el.tagName === "part-list");
-  root.insertBefore(credit, partList || null);
-
-  return 1;
+  return {
+    composer: composer || null,
+    rights: rights || null,
+  };
 }
