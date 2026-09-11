@@ -16,7 +16,7 @@
  * whole extension point for this file.
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
-               fixBassDrumNoteheads, fixCymbalNoteheads];
+               fixBassDrumNoteheads, fixCymbalNoteheads, fixAllRestMeasures];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -473,6 +473,123 @@ function fixCymbalNoteheads(doc) {
       note.removeChild(notehead);
       fixes++;
     }
+  }
+
+  return fixes;
+}
+
+/**
+ * Whole-measure rest workaround: when a measure contains only rests,
+ * replace all of its <note> elements with a single whole-measure rest.
+ *
+ * MusicXML has a dedicated encoding for this:
+ *
+ *   <note>
+ *     <rest measure="yes"/>
+ *     <duration>...</duration>
+ *     <voice>...</voice>
+ *     <type>whole</type>
+ *   </note>
+ *
+ * The measure="yes" attribute tells the renderer that this is a
+ * measure-level rest, which is rendered centered in the measure rather
+ * than as an ordinary whole-note rest.
+ *
+ * Only measures where EVERY <note> is a rest are changed. Measures
+ * containing any pitched or unpitched note are left untouched.
+ *
+ * @param {Document} doc
+ * @returns {number} number of measures converted
+ */
+function fixAllRestMeasures(doc) {
+  let fixes = 0;
+
+  const measures = Array.from(doc.getElementsByTagName("measure"));
+
+  for (const measure of measures) {
+    const notes = Array.from(measure.getElementsByTagName("note"));
+
+    // An empty measure isn't an all-rest measure.
+    if (notes.length === 0) continue;
+
+    // Every note must contain a <rest>.
+    const allRests = notes.every((note) =>
+      Array.from(note.children).some((el) => el.tagName === "rest")
+    );
+
+    if (!allRests) continue;
+
+    // Don't attempt to collapse a measure containing multiple voices
+    // or staves into one note. Those can have independently timed
+    // rests and require separate measure-level rests.
+    const voices = new Set();
+    const staffs = new Set();
+
+    for (const note of notes) {
+      const voice = Array.from(note.children).find(
+        (el) => el.tagName === "voice"
+      );
+      const staff = Array.from(note.children).find(
+        (el) => el.tagName === "staff"
+      );
+
+      if (voice) voices.add(voice.textContent.trim());
+      if (staff) staffs.add(staff.textContent.trim());
+    }
+
+    if (voices.size > 1 || staffs.size > 1) continue;
+
+    // Use the duration from the existing rest. All the notes are rests,
+    // so preserve the duration of the first one as the measure duration.
+    const firstNote = notes[0];
+
+    const duration = Array.from(firstNote.children).find(
+      (el) => el.tagName === "duration"
+    );
+
+    if (!duration) continue;
+
+    // Preserve voice/staff information where present.
+    const voice = Array.from(firstNote.children).find(
+      (el) => el.tagName === "voice"
+    );
+    const staff = Array.from(firstNote.children).find(
+      (el) => el.tagName === "staff"
+    );
+
+    // Remove every existing note.
+    for (const note of notes) {
+      measure.removeChild(note);
+    }
+
+    const newNote = doc.createElement("note");
+
+    const rest = doc.createElement("rest");
+    rest.setAttribute("measure", "yes");
+    newNote.appendChild(rest);
+
+    const newDuration = doc.createElement("duration");
+    newDuration.textContent = duration.textContent;
+    newNote.appendChild(newDuration);
+
+    if (voice) {
+      const newVoice = doc.createElement("voice");
+      newVoice.textContent = voice.textContent;
+      newNote.appendChild(newVoice);
+    }
+
+    const type = doc.createElement("type");
+    type.textContent = "whole";
+    newNote.appendChild(type);
+
+    if (staff) {
+      const newStaff = doc.createElement("staff");
+      newStaff.textContent = staff.textContent;
+      newNote.appendChild(newStaff);
+    }
+
+    measure.appendChild(newNote);
+    fixes++;
   }
 
   return fixes;
