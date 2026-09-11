@@ -1,5 +1,7 @@
 // main.js
 import { loadScore, updateSettings, renderPage, PAGE_SIZE_MM } from "./verovio-engine.js";
+import { extractScoreMetadata } from "./musicxml-fixups.js";
+import { stampScoreMetadata } from "./score-overlay.js";
 
 // -- element references ----------------------------------------------------
 
@@ -22,6 +24,9 @@ const marginRightEl = document.getElementById("margin-right");
 let scoreIsLoaded = false;
 let totalPages = 0;
 let loadedFileName = "score";
+// Composer/rights text pulled from the file at load time and stamped
+// onto page 1's SVG by renderAllPages() — see score-overlay.js.
+let currentMetadata = { composer: null, rights: null };
 
 function currentSettings() {
   return {
@@ -65,11 +70,31 @@ function clearError() {
 
 function renderAllPages(pageCount) {
   scoreArea.innerHTML = "";
+
+  const settings = currentSettings();
+  let pageWidthMm = PAGE_SIZE_MM.width;
+  let pageHeightMm = PAGE_SIZE_MM.height;
+  if (settings.orientation === "landscape") {
+    [pageWidthMm, pageHeightMm] = [pageHeightMm, pageWidthMm];
+  }
+  const layoutMm = {
+    pageWidthMm,
+    pageHeightMm,
+    marginTopMm: settings.marginTopMm,
+    marginRightMm: settings.marginRightMm,
+    marginBottomMm: settings.marginBottomMm,
+    marginLeftMm: settings.marginLeftMm,
+  };
+
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
     const svgMarkup = renderPage(pageNumber);
     const pageEl = document.createElement("div");
     pageEl.className = "page";
     pageEl.innerHTML = svgMarkup;
+    stampScoreMetadata(pageEl.querySelector("svg"), currentMetadata, {
+      ...layoutMm,
+      isFirstPage: pageNumber === 1,
+    });
     scoreArea.appendChild(pageEl);
   }
 }
@@ -99,6 +124,7 @@ async function handleFile(file) {
   setStatus(`Engraving “${file.name}”…`);
   try {
     const text = await readFileAsText(file);
+    currentMetadata = extractScoreMetadata(text);
     totalPages = await loadScore(text, currentSettings());
     renderAllPages(totalPages);
     scoreIsLoaded = true;
