@@ -16,7 +16,8 @@
  * whole extension point for this file.
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
-               fixBassDrumNoteheads, fixCymbalNoteheads, fixAllRestMeasures];
+               fixBassDrumNoteheads, fixCymbalNoteheads, fixAllRestMeasures,
+               fixMissingComposerCredit];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -593,4 +594,79 @@ function fixAllRestMeasures(doc) {
   }
 
   return fixes;
+}
+
+/**
+ * Missing composer credit workaround: when a score specifies a composer via
+ * <creator type="composer"> but lacks a visual <credit> element with a
+ * <credit-type>composer</credit-type>, Verovio does not render the composer name.
+ *
+ * Fix: checks for an existing <credit-type>composer</credit-type> (no-op if found).
+ * Otherwise, extracts the composer name from <creator type="composer">, builds
+ * a right-justified, top-aligned <credit> element, computes its position from
+ * <defaults><page-layout> dimensions when available, and inserts it before
+ * <part-list> (after defaults and alongside existing credits).
+ *
+ * @param {Document} doc
+ * @returns {number} number of credits added
+ */
+function fixMissingComposerCredit(doc) {
+  const creditTypes = Array.from(doc.getElementsByTagName("credit-type"));
+  for (const ct of creditTypes) {
+    if (ct.textContent.trim().toLowerCase() === "composer") {
+      return 0;
+    }
+  }
+
+  const creators = Array.from(doc.getElementsByTagName("creator"));
+  const composerCreator = creators.find(
+    (c) => c.getAttribute("type")?.toLowerCase() === "composer"
+  );
+  if (!composerCreator || !composerCreator.textContent.trim()) {
+    return 0;
+  }
+  const composerName = composerCreator.textContent.trim();
+
+  const root = doc.documentElement;
+  const partList = root.getElementsByTagName("part-list")[0];
+  if (!partList) return 0;
+
+  const credit = doc.createElement("credit");
+  const creditType = doc.createElement("credit-type");
+  creditType.textContent = "composer";
+  credit.appendChild(creditType);
+
+  const creditWords = doc.createElement("credit-words");
+  creditWords.textContent = composerName;
+  creditWords.setAttribute("justify", "right");
+  creditWords.setAttribute("valign", "top");
+
+  const pageLayout = doc.getElementsByTagName("page-layout")[0];
+  if (pageLayout) {
+    const pageWidthEl = pageLayout.getElementsByTagName("page-width")[0];
+    const pageHeightEl = pageLayout.getElementsByTagName("page-height")[0];
+    const pageMarginsEl = pageLayout.getElementsByTagName("page-margins")[0];
+    const topMarginEl = pageMarginsEl ? pageMarginsEl.getElementsByTagName("top-margin")[0] : null;
+    const rightMarginEl = pageMarginsEl ? pageMarginsEl.getElementsByTagName("right-margin")[0] : null;
+
+    if (pageWidthEl && rightMarginEl) {
+      const pageWidth = parseFloat(pageWidthEl.textContent);
+      const rightMargin = parseFloat(rightMarginEl.textContent);
+      if (!isNaN(pageWidth) && !isNaN(rightMargin)) {
+        creditWords.setAttribute("default-x", (pageWidth - rightMargin).toString());
+      }
+    }
+
+    if (pageHeightEl && topMarginEl) {
+      const pageHeight = parseFloat(pageHeightEl.textContent);
+      const topMargin = parseFloat(topMarginEl.textContent);
+      if (!isNaN(pageHeight) && !isNaN(topMargin)) {
+        creditWords.setAttribute("default-y", (pageHeight - topMargin).toString());
+      }
+    }
+  }
+
+  credit.appendChild(creditWords);
+  root.insertBefore(credit, partList);
+  return 1;
 }
