@@ -597,76 +597,114 @@ function fixAllRestMeasures(doc) {
 }
 
 /**
- * Missing composer credit workaround: when a score specifies a composer via
- * <creator type="composer"> but lacks a visual <credit> element with a
- * <credit-type>composer</credit-type>, Verovio does not render the composer name.
+ * Missing composer credit workaround: with `header`/`footer` set to
+ * "auto", Verovio builds the printed title/composer/etc. block from
+ * MusicXML's <credit> elements — the page-layout data that says what
+ * actually gets drawn on the page — not from <identification><creator>,
+ * which is bibliographic/indexing metadata and isn't itself positioned
+ * on the page. A file can have a perfectly correct
+ * <creator type="composer"> and still print no composer line if there
+ * is no <credit> whose <credit-type> is "composer" alongside it.
  *
- * Fix: checks for an existing <credit-type>composer</credit-type> (no-op if found).
- * Otherwise, extracts the composer name from <creator type="composer">, builds
- * a right-justified, top-aligned <credit> element, computes its position from
- * <defaults><page-layout> dimensions when available, and inserts it before
- * <part-list> (after defaults and alongside existing credits).
+ * This is a common gap in exported MusicXML: exporters that emit a
+ * title/subtitle credit block sometimes still forget the matching
+ * composer one, even though they got the semantic <creator> right.
+ *
+ * Fix: if <identification> has a non-empty <creator type="composer">
+ * and no existing <credit> is typed "composer", add one. It's built
+ * the way notation software conventionally builds it (Finale, Sibelius,
+ * Dolet exports, etc.): right-justified, aligned to the top of the
+ * page, positioned from the page's own layout metrics when given.
+ *
+ * Important: if a composer <credit> already exists, this is a no-op —
+ * the file already stores the composer the way Verovio expects, and
+ * the fixer won't touch or duplicate it.
  *
  * @param {Document} doc
- * @returns {number} number of credits added
+ * @returns {number} 1 if a composer credit was added, 0 otherwise
  */
 function fixMissingComposerCredit(doc) {
-  const creditTypes = Array.from(doc.getElementsByTagName("credit-type"));
-  for (const ct of creditTypes) {
-    if (ct.textContent.trim().toLowerCase() === "composer") {
-      return 0;
-    }
-  }
-
   const creators = Array.from(doc.getElementsByTagName("creator"));
   const composerCreator = creators.find(
-    (c) => c.getAttribute("type")?.toLowerCase() === "composer"
+    (el) => (el.getAttribute("type") || "").trim().toLowerCase() === "composer"
   );
-  if (!composerCreator || !composerCreator.textContent.trim()) {
-    return 0;
-  }
+  if (!composerCreator) return 0; // no composer metadata to work from
+
   const composerName = composerCreator.textContent.trim();
+  if (!composerName) return 0;
+
+  const creditTypes = Array.from(doc.getElementsByTagName("credit-type"));
+  const hasComposerCredit = creditTypes.some(
+    (el) => el.textContent.trim().toLowerCase() === "composer"
+  );
+  // Already stored the way Verovio expects — nothing to fix.
+  if (hasComposerCredit) return 0;
 
   const root = doc.documentElement;
-  const partList = root.getElementsByTagName("part-list")[0];
-  if (!partList) return 0;
+
+  // Position it the way exporters conventionally do: right-justified,
+  // aligned to the top of the page. Pull actual page dimensions from
+  // <defaults><page-layout> when present so it lands in the real
+  // top-right corner instead of an arbitrary guessed position.
+  let defaultX = null;
+  let defaultY = null;
+  const defaults = doc.getElementsByTagName("defaults")[0];
+  const pageLayout = defaults
+    ? defaults.getElementsByTagName("page-layout")[0]
+    : null;
+  if (pageLayout) {
+    const pageWidth = parseFloat(
+      getFirstChildText(pageLayout, "page-width")
+    );
+    const pageHeight = parseFloat(
+      getFirstChildText(pageLayout, "page-height")
+    );
+    const pageMargins = pageLayout.getElementsByTagName("page-margins")[0];
+    const rightMargin = pageMargins
+      ? parseFloat(getFirstChildText(pageMargins, "right-margin"))
+      : NaN;
+    const topMargin = pageMargins
+      ? parseFloat(getFirstChildText(pageMargins, "top-margin"))
+      : NaN;
+    if (!isNaN(pageWidth) && !isNaN(rightMargin)) defaultX = pageWidth - rightMargin;
+    if (!isNaN(pageHeight) && !isNaN(topMargin)) defaultY = pageHeight - topMargin;
+  }
 
   const credit = doc.createElement("credit");
+  credit.setAttribute("page", "1");
+
   const creditType = doc.createElement("credit-type");
   creditType.textContent = "composer";
   credit.appendChild(creditType);
 
-  const creditWords = doc.createElement("credit-words");
-  creditWords.textContent = composerName;
-  creditWords.setAttribute("justify", "right");
-  creditWords.setAttribute("valign", "top");
+  const words = doc.createElement("credit-words");
+  if (defaultX !== null) words.setAttribute("default-x", String(defaultX));
+  if (defaultY !== null) words.setAttribute("default-y", String(defaultY));
+  words.setAttribute("justify", "right");
+  words.setAttribute("valign", "top");
+  words.textContent = composerName;
+  credit.appendChild(words);
 
-  const pageLayout = doc.getElementsByTagName("page-layout")[0];
-  if (pageLayout) {
-    const pageWidthEl = pageLayout.getElementsByTagName("page-width")[0];
-    const pageHeightEl = pageLayout.getElementsByTagName("page-height")[0];
-    const pageMarginsEl = pageLayout.getElementsByTagName("page-margins")[0];
-    const topMarginEl = pageMarginsEl ? pageMarginsEl.getElementsByTagName("top-margin")[0] : null;
-    const rightMarginEl = pageMarginsEl ? pageMarginsEl.getElementsByTagName("right-margin")[0] : null;
+  // <credit> is only legal as a direct child of <score-partwise> (or
+  // <score-timewise>), after <defaults> and before <part-list>. Insert
+  // it alongside any existing credits (right before the first one, so
+  // it stacks with title/subtitle) or, failing that, right before
+  // <part-list>.
+  const rootChildren = Array.from(root.children);
+  const firstCredit = rootChildren.find((el) => el.tagName === "credit");
+  const partList = rootChildren.find((el) => el.tagName === "part-list");
+  root.insertBefore(credit, firstCredit || partList || null);
 
-    if (pageWidthEl && rightMarginEl) {
-      const pageWidth = parseFloat(pageWidthEl.textContent);
-      const rightMargin = parseFloat(rightMarginEl.textContent);
-      if (!isNaN(pageWidth) && !isNaN(rightMargin)) {
-        creditWords.setAttribute("default-x", (pageWidth - rightMargin).toString());
-      }
-    }
-
-    if (pageHeightEl && topMarginEl) {
-      const pageHeight = parseFloat(pageHeightEl.textContent);
-      const topMargin = parseFloat(topMarginEl.textContent);
-      if (!isNaN(pageHeight) && !isNaN(topMargin)) {
-        creditWords.setAttribute("default-y", (pageHeight - topMargin).toString());
-      }
-    }
-  }
-
-  credit.appendChild(creditWords);
-  root.insertBefore(credit, partList);
   return 1;
+}
+
+/**
+ * Returns the trimmed text content of the first direct child of
+ * `parent` named `tagName`, or an empty string if there isn't one.
+ */
+function getFirstChildText(parent, tagName) {
+  const child = Array.from(parent.children).find(
+    (el) => el.tagName === tagName
+  );
+  return child ? child.textContent.trim() : "";
 }
