@@ -398,3 +398,82 @@ function setBassDrumDisplayPosition(doc, note) {
   displayOctave.textContent = "4";
 }
 
+/**
+ * Cymbal notation workaround: some cymbal parts use an "x" notehead
+ * for notes that are positioned at B4. Verovio can interpret the
+ * combination as a special notehead when the explicit <notehead>x</notehead>
+ * is present, so remove the notehead element for those notes.
+ *
+ * Fix: locate parts whose <part-name> contains "cymbal" (case insensitive),
+ * then only within those parts, find notes with:
+ *   <unpitched>
+ *     <display-step>B</display-step>
+ *     <display-octave>4</display-octave>
+ *   </unpitched>
+ * and an <notehead> whose value is "x".
+ *
+ * Only the matching cymbal parts are inspected.
+ *
+ * @param {Document} doc
+ * @returns {number} number of notehead elements removed
+ */
+function fixCymbalXNoteheads(doc) {
+  let fixes = 0;
+
+  const scoreParts = Array.from(doc.getElementsByTagName("score-part"));
+  const cymbalPartIds = new Set();
+
+  for (const scorePart of scoreParts) {
+    const partName = scorePart.getElementsByTagName("part-name")[0];
+    if (!partName) continue;
+
+    if (partName.textContent.toLowerCase().includes("cymbal")) {
+      const id = scorePart.getAttribute("id");
+      if (id) cymbalPartIds.add(id);
+    }
+  }
+
+  if (cymbalPartIds.size === 0) return 0;
+
+  const parts = Array.from(doc.getElementsByTagName("part"));
+
+  for (const part of parts) {
+    if (!cymbalPartIds.has(part.getAttribute("id"))) continue;
+
+    const notes = Array.from(part.getElementsByTagName("note"));
+
+    for (const note of notes) {
+      const notehead = Array.from(note.children).find(
+        (el) => el.tagName === "notehead"
+      );
+
+      if (!notehead) continue;
+
+      if (notehead.textContent.trim().toLowerCase() !== "x") continue;
+
+      const unpitched = Array.from(note.children).find(
+        (el) => el.tagName === "unpitched"
+      );
+
+      if (!unpitched) continue;
+
+      const displayStep = Array.from(unpitched.children).find(
+        (el) => el.tagName === "display-step"
+      );
+
+      const displayOctave = Array.from(unpitched.children).find(
+        (el) => el.tagName === "display-octave"
+      );
+
+      if (!displayStep || !displayOctave) continue;
+
+      if (displayStep.textContent.trim().toUpperCase() !== "B") continue;
+      if (displayOctave.textContent.trim() !== "4") continue;
+
+      note.removeChild(notehead);
+      fixes++;
+    }
+  }
+
+  return fixes;
+}
