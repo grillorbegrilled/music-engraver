@@ -16,7 +16,7 @@
  * whole extension point for this file.
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
-               fixBassDrumNoteheads];
+               fixBassDrumNoteheads, fixCymbalXNoteheads];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
