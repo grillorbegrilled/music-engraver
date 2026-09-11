@@ -611,10 +611,14 @@ function fixAllRestMeasures(doc) {
  * composer one, even though they got the semantic <creator> right.
  *
  * Fix: if <identification> has a non-empty <creator type="composer">
- * and no existing <credit> is typed "composer", add one. It's built
- * the way notation software conventionally builds it (Finale, Sibelius,
- * Dolet exports, etc.): right-justified, aligned to the top of the
- * page, positioned from the page's own layout metrics when given.
+ * and no existing <credit> is typed "composer", add one — bare, with
+ * no position/style attributes, matching the shape of this pipeline's
+ * own working title/subtitle credits. Verovio's auto layout places
+ * recognized credit types (title, subtitle, composer, ...) itself;
+ * explicit default-x/default-y/justify/valign attributes push it onto
+ * a "manually positioned" conversion path instead, which is worth
+ * avoiding here since it isn't how the rest of this file's credits
+ * are encoded.
  *
  * Important: if a composer <credit> already exists, this is a no-op —
  * the file already stores the composer the way Verovio expects, and
@@ -642,69 +646,34 @@ function fixMissingComposerCredit(doc) {
 
   const root = doc.documentElement;
 
-  // Position it the way exporters conventionally do: right-justified,
-  // aligned to the top of the page. Pull actual page dimensions from
-  // <defaults><page-layout> when present so it lands in the real
-  // top-right corner instead of an arbitrary guessed position.
-  let defaultX = null;
-  let defaultY = null;
-  const defaults = doc.getElementsByTagName("defaults")[0];
-  const pageLayout = defaults
-    ? defaults.getElementsByTagName("page-layout")[0]
-    : null;
-  if (pageLayout) {
-    const pageWidth = parseFloat(
-      getFirstChildText(pageLayout, "page-width")
-    );
-    const pageHeight = parseFloat(
-      getFirstChildText(pageLayout, "page-height")
-    );
-    const pageMargins = pageLayout.getElementsByTagName("page-margins")[0];
-    const rightMargin = pageMargins
-      ? parseFloat(getFirstChildText(pageMargins, "right-margin"))
-      : NaN;
-    const topMargin = pageMargins
-      ? parseFloat(getFirstChildText(pageMargins, "top-margin"))
-      : NaN;
-    if (!isNaN(pageWidth) && !isNaN(rightMargin)) defaultX = pageWidth - rightMargin;
-    if (!isNaN(pageHeight) && !isNaN(topMargin)) defaultY = pageHeight - topMargin;
-  }
-
+  // Deliberately bare: no default-x/default-y/justify/valign. Working
+  // title/subtitle credits in exports from this pipeline carry no
+  // position or style attributes either — Verovio's auto layout picks
+  // placement purely from <credit-type>. Adding explicit coordinates
+  // sends it down a different ("manually positioned") conversion path,
+  // which is what broke title rendering on the first attempt at this
+  // fixer. Match the shape of what's already known to work.
   const credit = doc.createElement("credit");
-  credit.setAttribute("page", "1");
 
   const creditType = doc.createElement("credit-type");
   creditType.textContent = "composer";
   credit.appendChild(creditType);
 
   const words = doc.createElement("credit-words");
-  if (defaultX !== null) words.setAttribute("default-x", String(defaultX));
-  if (defaultY !== null) words.setAttribute("default-y", String(defaultY));
-  words.setAttribute("justify", "right");
-  words.setAttribute("valign", "top");
   words.textContent = composerName;
   credit.appendChild(words);
 
   // <credit> is only legal as a direct child of <score-partwise> (or
-  // <score-timewise>), after <defaults> and before <part-list>. Insert
-  // it alongside any existing credits (right before the first one, so
-  // it stacks with title/subtitle) or, failing that, right before
-  // <part-list>.
+  // <score-timewise>), after <defaults> and before <part-list>. Some
+  // consumers (Verovio included) treat document order as a positional
+  // hint — e.g. "first credit is the title slot" — independent of what
+  // <credit-type> says. So append after any existing credits (title,
+  // subtitle, etc.) rather than inserting before them, to avoid
+  // reordering credits whose rendering already works. Insert right
+  // before <part-list>.
   const rootChildren = Array.from(root.children);
-  const firstCredit = rootChildren.find((el) => el.tagName === "credit");
   const partList = rootChildren.find((el) => el.tagName === "part-list");
-  root.insertBefore(credit, firstCredit || partList || null);
+  root.insertBefore(credit, partList || null);
 
   return 1;
-}
-
-/**
- * Returns the trimmed text content of the first direct child of
- * `parent` named `tagName`, or an empty string if there isn't one.
- */
-function getFirstChildText(parent, tagName) {
-  const child = Array.from(parent.children).find(
-    (el) => el.tagName === tagName
-  );
-  return child ? child.textContent.trim() : "";
 }
