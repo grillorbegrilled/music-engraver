@@ -462,7 +462,7 @@ function fixCymbalNoteheads(doc) {
       const step = displayStep.textContent.trim().toUpperCase();
       const octave = displayOctave.textContent.trim();
 
-      if (octave !== "4" || (step !== "A" && step !== "B")) continue;
+      if (octave !== "4" || (step !== "E" && step !== "D")) continue;
 
       const notehead = Array.from(note.children).find(
         (el) => el.tagName === "notehead"
