@@ -16,7 +16,7 @@
  * whole extension point for this file.
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
-               fixBassDrumNoteheads, fixCymbalXNoteheads];
+               fixBassDrumNoteheads, fixCymbalNoteheads];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -399,27 +399,26 @@ function setBassDrumDisplayPosition(doc, note) {
 }
 
 /**
- * Cymbal notation workaround: some cymbal parts use an "x" notehead
- * for notes that are positioned at B4. Verovio can interpret the
- * combination as a special notehead when the explicit <notehead>x</notehead>
- * is present, so remove the notehead element for those notes.
+ * Cymbal notation workaround: cymbal parts sometimes contain special
+ * <notehead> values on notes positioned at A4 or B4. For those notes,
+ * remove the <notehead> element entirely so Verovio uses its normal
+ * notehead.
  *
- * Fix: locate parts whose <part-name> contains "cymbal" (case insensitive),
- * then only within those parts, find notes with:
- *   <unpitched>
- *     <display-step>B</display-step>
- *     <display-octave>4</display-octave>
- *   </unpitched>
- * and an <notehead> whose value is "x".
+ * Fix: locate any <part> whose corresponding <score-part>/<part-name>
+ * contains "cymbal" (case insensitive). Within those parts only, find
+ * notes with an <unpitched> display position of A4 or B4 and remove
+ * their <notehead> element.
  *
- * Only the matching cymbal parts are inspected.
+ * Important: only matching cymbal parts are inspected. No notes in any
+ * other part are modified.
  *
  * @param {Document} doc
- * @returns {number} number of notehead elements removed
+ * @returns {number} number of noteheads removed
  */
-function fixCymbalXNoteheads(doc) {
+function fixCymbalNoteheads(doc) {
   let fixes = 0;
 
+  // Find the IDs of score-parts whose names contain "cymbal".
   const scoreParts = Array.from(doc.getElementsByTagName("score-part"));
   const cymbalPartIds = new Set();
 
@@ -435,6 +434,8 @@ function fixCymbalXNoteheads(doc) {
 
   if (cymbalPartIds.size === 0) return 0;
 
+  // Only inspect the actual <part> elements corresponding to those
+  // score-parts.
   const parts = Array.from(doc.getElementsByTagName("part"));
 
   for (const part of parts) {
@@ -443,14 +444,6 @@ function fixCymbalXNoteheads(doc) {
     const notes = Array.from(part.getElementsByTagName("note"));
 
     for (const note of notes) {
-      const notehead = Array.from(note.children).find(
-        (el) => el.tagName === "notehead"
-      );
-
-      if (!notehead) continue;
-
-      if (notehead.textContent.trim().toLowerCase() !== "x") continue;
-
       const unpitched = Array.from(note.children).find(
         (el) => el.tagName === "unpitched"
       );
@@ -460,15 +453,22 @@ function fixCymbalXNoteheads(doc) {
       const displayStep = Array.from(unpitched.children).find(
         (el) => el.tagName === "display-step"
       );
-
       const displayOctave = Array.from(unpitched.children).find(
         (el) => el.tagName === "display-octave"
       );
 
       if (!displayStep || !displayOctave) continue;
 
-      if (!["A", "B"].includes(displayStep.textContent.trim().toUpperCase())) continue;
-      if (displayOctave.textContent.trim() !== "4") continue;
+      const step = displayStep.textContent.trim().toUpperCase();
+      const octave = displayOctave.textContent.trim();
+
+      if (octave !== "4" || (step !== "A" && step !== "B")) continue;
+
+      const notehead = Array.from(note.children).find(
+        (el) => el.tagName === "notehead"
+      );
+
+      if (!notehead) continue;
 
       note.removeChild(notehead);
       fixes++;
