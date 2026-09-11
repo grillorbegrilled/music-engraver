@@ -467,7 +467,7 @@ function fixCymbalXNoteheads(doc) {
 
       if (!displayStep || !displayOctave) continue;
 
-      if (displayStep.textContent.trim().toUpperCase() !== "B") continue;
+      if (!["A", "B"].includes(displayStep.textContent.trim().toUpperCase())) continue;
       if (displayOctave.textContent.trim() !== "4") continue;
 
       note.removeChild(notehead);
