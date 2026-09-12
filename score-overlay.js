@@ -197,6 +197,34 @@ function shrinkToFit(textEl, maxWidth) {
  *   marginLeftMm: number,
  * }} layout
  */
+/**
+ * Renders a plain-text diagnostic panel directly on the page (instead
+ * of console logging, which isn't reachable without devtools on
+ * mobile). Appended once, right after the stamped page, so it can be
+ * screenshotted the same way the rendered score itself is.
+ */
+function renderDiagnosticsPanel(svgElement, data) {
+  const existing = document.getElementById("score-overlay-diagnostics");
+  if (existing) existing.remove();
+
+  const panel = document.createElement("pre");
+  panel.id = "score-overlay-diagnostics";
+  panel.style.cssText =
+    "background:#fff8e1;color:#000;border:2px solid #c62828;" +
+    "padding:12px;margin:12px 0;font-size:12px;line-height:1.4;" +
+    "white-space:pre-wrap;word-break:break-word;font-family:monospace;";
+  panel.textContent =
+    "score-overlay diagnostics (temporary — safe to ignore/remove once positioning is fixed)\n\n" +
+    JSON.stringify(data, null, 2);
+
+  const pageEl = svgElement.closest(".page") || svgElement.parentElement;
+  if (pageEl && pageEl.parentElement) {
+    pageEl.parentElement.insertBefore(panel, pageEl.nextSibling);
+  } else {
+    document.body.appendChild(panel);
+  }
+}
+
 export function stampScoreMetadata(svgElement, metadata, layout) {
   if (!svgElement || !layout || !layout.isFirstPage) return;
   if (!metadata || (!metadata.composer && !metadata.rights)) return;
@@ -205,23 +233,27 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
 
   // --- TEMPORARY DIAGNOSTIC ---------------------------------------------
   // Two prior attempts at scaleX/scaleY guessed wrong about what
-  // Verovio actually puts in these attributes. Logging the raw values
-  // instead of guessing a third time — paste this console output back
-  // so the fix can be based on what's really there.
-  console.group("[score-overlay] diagnostic");
-  console.log("raw viewBox attr:", svgElement.getAttribute("viewBox"));
-  console.log("raw width attr:", svgElement.getAttribute("width"));
-  console.log("raw height attr:", svgElement.getAttribute("height"));
-  console.log("parsed page geometry:", { width, height, scaleX, scaleY });
+  // Verovio actually puts in these attributes. Collecting the raw
+  // values into an on-page panel instead of guessing a third time —
+  // screenshot/copy the panel text so the fix can be based on what's
+  // really there.
+  const diagnostics = {
+    rawViewBoxAttr: svgElement.getAttribute("viewBox"),
+    rawWidthAttr: svgElement.getAttribute("width"),
+    rawHeightAttr: svgElement.getAttribute("height"),
+    parsedPageGeometry: { width, height, scaleX, scaleY },
+  };
   const pgHeadDebug = svgElement.querySelector(".pgHead");
-  console.log("found .pgHead element:", pgHeadDebug);
+  diagnostics.foundPgHead = !!pgHeadDebug;
   if (pgHeadDebug) {
-    console.log("pgHead outerHTML:", pgHeadDebug.outerHTML.slice(0, 500));
+    diagnostics.pgHeadOuterHTML = pgHeadDebug.outerHTML.slice(0, 500);
   }
-  console.groupEnd();
-  // --- END DIAGNOSTIC -----------------------------------------------------
+  // --- END DIAGNOSTIC (continued near the bottom of this function) -------
 
-  if (!width || !height) return; // no coordinate space to place text in safely
+  if (!width || !height) {
+    renderDiagnosticsPanel(svgElement, diagnostics);
+    return; // no coordinate space to place text in safely
+  }
 
   if (metadata.composer) {
     const titleBBox = getTitleBBox(svgElement);
@@ -235,13 +267,13 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
       : layout.marginTopMm * scaleY * 0.7;
     const composerX = width - layout.marginRightMm * scaleX; // fixed to the right margin, independent of scale
 
-    console.log("[score-overlay] composer:", {
+    diagnostics.composer = {
       titleBBox,
       fontSize,
       centerY,
       composerX,
       marginRightMm: layout.marginRightMm,
-    });
+    };
 
     addText(svgElement, {
       text: metadata.composer,
@@ -258,12 +290,12 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
     const rightsX = width / 2;
     const rightsY = height - layout.marginBottomMm * scaleY; // baseline sits on the bottom margin
 
-    console.log("[score-overlay] rights:", {
+    diagnostics.rights = {
       rightsX,
       rightsY,
       maxFontSize,
       marginBottomMm: layout.marginBottomMm,
-    });
+    };
 
     const rightsEl = addText(svgElement, {
       text: metadata.rights,
@@ -275,16 +307,20 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
 
     const usableWidth = width - (layout.marginLeftMm + layout.marginRightMm) * scaleX;
     shrinkToFit(rightsEl, usableWidth);
+    diagnostics.rights.usableWidth = usableWidth;
+    diagnostics.rights.finalFontSize = parseFloat(rightsEl.getAttribute("font-size"));
   }
 
-  // Also log the on-screen rendered size, for comparison against the
-  // coordinate space above — if these proportions don't match, the
-  // SVG's own internal coordinate space doesn't correspond to what's
-  // visually shown, which would explain misplacement independent of
-  // any scale-factor math.
+  // Also record the on-screen rendered size, for comparison against
+  // the coordinate space above — if these proportions don't match,
+  // the SVG's own internal coordinate space doesn't correspond to
+  // what's visually shown, which would explain misplacement
+  // independent of any scale-factor math.
   const clientRect = svgElement.getBoundingClientRect();
-  console.log("[score-overlay] on-screen size:", {
+  diagnostics.onScreenSize = {
     clientWidth: clientRect.width,
     clientHeight: clientRect.height,
-  });
+  };
+
+  renderDiagnosticsPanel(svgElement, diagnostics);
 }
