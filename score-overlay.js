@@ -21,27 +21,63 @@
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+/** Parses a length attribute that should be a plain real-world
+ * millimeter value (thanks to mmOutput:true) — e.g. "215.9mm" or
+ * "215.9". Returns null for anything that isn't a physical unit
+ * (e.g. a percentage), since that can't be used to derive a scale. */
+function parseMmAttribute(value) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (trimmed.endsWith("%")) return null;
+  const n = parseFloat(trimmed);
+  return isNaN(n) || n <= 0 ? null : n;
+}
+
 /**
- * Reads an SVG element's own drawing coordinate space (viewBox,
- * falling back to width/height attributes) so placement is computed
- * in whatever units Verovio actually drew the page in.
+ * Reads the page's drawing coordinate space (viewBox) AND the
+ * viewBox-units-per-real-millimeter scale, both from the live <svg>
+ * itself rather than from any assumption about what page size this
+ * app *thinks* it configured Verovio to produce.
+ *
+ * With mmOutput:true, Verovio's <svg> carries both a viewBox (its own
+ * internal drawing units — whatever those actually turn out to be, in
+ * case scaleToPageSize/adjustPageHeight adjust the final output from
+ * the raw page-size options) and width/height attributes in real mm.
+ * Dividing one by the other gives the true scale empirically, self-
+ * consistently, no matter what that internal unit convention is.
  */
-function getViewBoxSize(svgElement) {
+function getPageGeometry(svgElement) {
   const viewBox = svgElement.getAttribute("viewBox");
+  let vbWidth = null;
+  let vbHeight = null;
   if (viewBox) {
     const parts = viewBox.trim().split(/\s+/).map(Number);
     if (parts.length === 4 && parts.every((n) => !isNaN(n))) {
-      return { width: parts[2], height: parts[3] };
+      vbWidth = parts[2];
+      vbHeight = parts[3];
     }
   }
-  const width = parseFloat(svgElement.getAttribute("width"));
-  const height = parseFloat(svgElement.getAttribute("height"));
-  return { width: width || null, height: height || null };
+
+  const widthMm = parseMmAttribute(svgElement.getAttribute("width"));
+  const heightMm = parseMmAttribute(svgElement.getAttribute("height"));
+
+  if (vbWidth === null || vbHeight === null) {
+    // No viewBox at all: treat width/height attributes as the
+    // drawing space directly (1 unit == 1mm).
+    return { width: widthMm, height: heightMm, scaleX: 1, scaleY: 1 };
+  }
+
+  return {
+    width: vbWidth,
+    height: vbHeight,
+    scaleX: widthMm ? vbWidth / widthMm : 1,
+    scaleY: heightMm ? vbHeight / heightMm : 1,
+  };
 }
 
 /**
  * Bounding box of `el`, transformed into the coordinate space of the
- * outermost <svg> — i.e. the same space `getViewBoxSize` describes.
+ * outermost <svg> — i.e. the same space `getPageGeometry` describes.
  * Needed because Verovio wraps header content in <g> elements that
  * may carry their own transforms; a raw getBBox() is only correct in
  * that <g>'s local space, not the page's. Returns null if `el` isn't
@@ -155,8 +191,6 @@ function shrinkToFit(textEl, maxWidth) {
  * @param {{composer: string|null, rights: string|null}} metadata
  * @param {{
  *   isFirstPage: boolean,
- *   pageWidthMm: number,
- *   pageHeightMm: number,
  *   marginTopMm: number,
  *   marginRightMm: number,
  *   marginBottomMm: number,
@@ -167,14 +201,8 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
   if (!svgElement || !layout || !layout.isFirstPage) return;
   if (!metadata || (!metadata.composer && !metadata.rights)) return;
 
-  const { width, height } = getViewBoxSize(svgElement);
+  const { width, height, scaleX, scaleY } = getPageGeometry(svgElement);
   if (!width || !height) return; // no coordinate space to place text in safely
-
-  // Scale factors from real millimeters into this SVG's own drawing
-  // units, so e.g. a marginRightMm of 12.7mm lands at the actual right
-  // margin regardless of what internal unit scale Verovio drew in.
-  const scaleX = width / layout.pageWidthMm;
-  const scaleY = height / layout.pageHeightMm;
 
   if (metadata.composer) {
     const titleBBox = getTitleBBox(svgElement);

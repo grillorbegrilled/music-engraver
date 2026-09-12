@@ -72,14 +72,7 @@ function renderAllPages(pageCount) {
   scoreArea.innerHTML = "";
 
   const settings = currentSettings();
-  let pageWidthMm = PAGE_SIZE_MM.width;
-  let pageHeightMm = PAGE_SIZE_MM.height;
-  if (settings.orientation === "landscape") {
-    [pageWidthMm, pageHeightMm] = [pageHeightMm, pageWidthMm];
-  }
   const layoutMm = {
-    pageWidthMm,
-    pageHeightMm,
     marginTopMm: settings.marginTopMm,
     marginRightMm: settings.marginRightMm,
     marginBottomMm: settings.marginBottomMm,
