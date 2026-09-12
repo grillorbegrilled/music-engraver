@@ -202,6 +202,25 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
   if (!metadata || (!metadata.composer && !metadata.rights)) return;
 
   const { width, height, scaleX, scaleY } = getPageGeometry(svgElement);
+
+  // --- TEMPORARY DIAGNOSTIC ---------------------------------------------
+  // Two prior attempts at scaleX/scaleY guessed wrong about what
+  // Verovio actually puts in these attributes. Logging the raw values
+  // instead of guessing a third time — paste this console output back
+  // so the fix can be based on what's really there.
+  console.group("[score-overlay] diagnostic");
+  console.log("raw viewBox attr:", svgElement.getAttribute("viewBox"));
+  console.log("raw width attr:", svgElement.getAttribute("width"));
+  console.log("raw height attr:", svgElement.getAttribute("height"));
+  console.log("parsed page geometry:", { width, height, scaleX, scaleY });
+  const pgHeadDebug = svgElement.querySelector(".pgHead");
+  console.log("found .pgHead element:", pgHeadDebug);
+  if (pgHeadDebug) {
+    console.log("pgHead outerHTML:", pgHeadDebug.outerHTML.slice(0, 500));
+  }
+  console.groupEnd();
+  // --- END DIAGNOSTIC -----------------------------------------------------
+
   if (!width || !height) return; // no coordinate space to place text in safely
 
   if (metadata.composer) {
@@ -214,10 +233,19 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
     const centerY = titleBBox
       ? titleBBox.y + titleBBox.height
       : layout.marginTopMm * scaleY * 0.7;
+    const composerX = width - layout.marginRightMm * scaleX; // fixed to the right margin, independent of scale
+
+    console.log("[score-overlay] composer:", {
+      titleBBox,
+      fontSize,
+      centerY,
+      composerX,
+      marginRightMm: layout.marginRightMm,
+    });
 
     addText(svgElement, {
       text: metadata.composer,
-      x: width - layout.marginRightMm * scaleX, // fixed to the right margin, independent of scale
+      x: composerX,
       y: centerY,
       anchor: "end",
       dominantBaseline: "central", // makes `y` the text's vertical center, not its baseline
@@ -227,10 +255,20 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
 
   if (metadata.rights) {
     const maxFontSize = 2.5 * scaleY; // "always small" cap
+    const rightsX = width / 2;
+    const rightsY = height - layout.marginBottomMm * scaleY; // baseline sits on the bottom margin
+
+    console.log("[score-overlay] rights:", {
+      rightsX,
+      rightsY,
+      maxFontSize,
+      marginBottomMm: layout.marginBottomMm,
+    });
+
     const rightsEl = addText(svgElement, {
       text: metadata.rights,
-      x: width / 2,
-      y: height - layout.marginBottomMm * scaleY, // baseline sits on the bottom margin
+      x: rightsX,
+      y: rightsY,
       anchor: "middle",
       fontSize: maxFontSize,
     });
@@ -238,4 +276,15 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
     const usableWidth = width - (layout.marginLeftMm + layout.marginRightMm) * scaleX;
     shrinkToFit(rightsEl, usableWidth);
   }
+
+  // Also log the on-screen rendered size, for comparison against the
+  // coordinate space above — if these proportions don't match, the
+  // SVG's own internal coordinate space doesn't correspond to what's
+  // visually shown, which would explain misplacement independent of
+  // any scale-factor math.
+  const clientRect = svgElement.getBoundingClientRect();
+  console.log("[score-overlay] on-screen size:", {
+    clientWidth: clientRect.width,
+    clientHeight: clientRect.height,
+  });
 }
