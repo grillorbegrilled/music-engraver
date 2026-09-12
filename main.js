@@ -91,11 +91,14 @@ function renderAllPages(pageCount) {
     const pageEl = document.createElement("div");
     pageEl.className = "page";
     pageEl.innerHTML = svgMarkup;
+    scoreArea.appendChild(pageEl);
+    // Stamping needs real layout (getBBox/getCTM/getComputedTextLength),
+    // which browsers only compute for elements connected to the
+    // document — so this has to happen after appendChild, not before.
     stampScoreMetadata(pageEl.querySelector("svg"), currentMetadata, {
       ...layoutMm,
       isFirstPage: pageNumber === 1,
     });
-    scoreArea.appendChild(pageEl);
   }
 }
 

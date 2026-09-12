@@ -12,11 +12,12 @@
 // the copyright line outright instead of racing Verovio's own
 // (also-unreliable) footer rendering.
 //
-// Call this after a page's SVG markup has been inserted into the DOM
-// (see main.js renderAllPages) — it mutates that live <svg> element in
-// place, so the stamped text rides along automatically wherever that
-// element goes next, including into main.js's PDF export path, which
-// clones the same DOM nodes.
+// IMPORTANT: call this AFTER the page's <svg> is attached to the live
+// document (main.js does this right after scoreArea.appendChild(pageEl),
+// not before). Positioning composer relative to the title, and
+// shrinking the rights text to fit, both need getBBox()/getCTM()/
+// getComputedTextLength() — browsers only compute real layout for
+// elements that are actually connected to the document.
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -38,32 +39,119 @@ function getViewBoxSize(svgElement) {
   return { width: width || null, height: height || null };
 }
 
-function addText(svgElement, { text, x, y, anchor, fontSize }) {
+/**
+ * Bounding box of `el`, transformed into the coordinate space of the
+ * outermost <svg> — i.e. the same space `getViewBoxSize` describes.
+ * Needed because Verovio wraps header content in <g> elements that
+ * may carry their own transforms; a raw getBBox() is only correct in
+ * that <g>'s local space, not the page's. Returns null if `el` isn't
+ * really laid out (e.g. disconnected from the document).
+ */
+function getBBoxInRootSpace(el) {
+  let bbox;
+  try {
+    bbox = el.getBBox();
+  } catch {
+    return null;
+  }
+  if (!bbox || (bbox.width === 0 && bbox.height === 0)) return null;
+
+  const ctm = el.getCTM();
+  if (!ctm) return null;
+
+  const corners = [
+    { x: bbox.x, y: bbox.y },
+    { x: bbox.x + bbox.width, y: bbox.y },
+    { x: bbox.x, y: bbox.y + bbox.height },
+    { x: bbox.x + bbox.width, y: bbox.y + bbox.height },
+  ].map((p) => new DOMPoint(p.x, p.y).matrixTransform(ctm));
+
+  const xs = corners.map((p) => p.x);
+  const ys = corners.map((p) => p.y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  };
+}
+
+/**
+ * Finds the title line Verovio's "auto" header drew, so composer can
+ * be positioned and sized relative to it. Verovio mirrors MEI element
+ * names as SVG @class values (documented in the Verovio reference
+ * book's "CSS and SVG" page), so a generated MEI <pgHead> becomes
+ * <g class="pgHead">; its first text run is the title, since title is
+ * always the first line Verovio draws there. Returns the root-space
+ * bbox, or null if it can't be found — callers should fall back to a
+ * fixed position rather than fail outright.
+ */
+function getTitleBBox(svgElement) {
+  const pgHead = svgElement.querySelector(".pgHead");
+  if (!pgHead) return null;
+  const titleTextEl = pgHead.querySelector("text, tspan") || pgHead;
+  return getBBoxInRootSpace(titleTextEl);
+}
+
+function addText(svgElement, { text, x, y, anchor, fontSize, dominantBaseline }) {
   const textEl = document.createElementNS(SVG_NS, "text");
   textEl.setAttribute("x", String(x));
   textEl.setAttribute("y", String(y));
   textEl.setAttribute("text-anchor", anchor);
+  if (dominantBaseline) textEl.setAttribute("dominant-baseline", dominantBaseline);
   textEl.setAttribute("font-family", "Times New Roman, Georgia, serif");
   textEl.setAttribute("font-size", String(fontSize));
   textEl.setAttribute("fill", "#000000");
   textEl.textContent = text;
   svgElement.appendChild(textEl);
+  return textEl;
 }
 
 /**
- * Stamps composer (top-right, roughly where a working "auto" header
- * would put it) and rights/copyright (bottom-center, small print —
- * conventional placement for engraved scores) onto one rendered page.
- * Both are title-page style: only meant for page 1. Call this once
- * per rendered page and let `isFirstPage` do the gating, rather than
- * calling it only for page 1 — keeps the call site in main.js simple.
+ * Shrinks `textEl`'s font-size, if needed, so its rendered width fits
+ * within `maxWidth` (in the same coordinate units as the SVG it's
+ * in). `textEl` must already be attached to the live document —
+ * getComputedTextLength() needs real layout to measure against. Text
+ * length scales linearly with font-size for a fixed font, so a single
+ * proportional adjustment is enough — no need to iterate.
+ */
+function shrinkToFit(textEl, maxWidth) {
+  const currentSize = parseFloat(textEl.getAttribute("font-size"));
+  if (!currentSize || currentSize <= 0 || !maxWidth || maxWidth <= 0) return;
+
+  let measured;
+  try {
+    measured = textEl.getComputedTextLength();
+  } catch {
+    return; // can't measure — leave the requested size as-is
+  }
+  if (measured > maxWidth) {
+    textEl.setAttribute("font-size", String(currentSize * (maxWidth / measured)));
+  }
+}
+
+/**
+ * Stamps composer and rights/copyright onto one rendered page.
+ * Title-page style: only meant for page 1 — call this once per
+ * rendered page and let `isFirstPage` gate it, so the call site in
+ * main.js doesn't need its own branch.
  *
- * Positions are computed from the page's real margin settings (in mm,
- * the same ones passed into Verovio's own layout options) scaled into
- * the SVG's own coordinate space, so the text lines up with whatever
- * margins are currently configured instead of a guessed position.
+ * Composer: right-anchored to the right margin — fixed regardless of
+ * notation scale, since it's derived from the physical margin
+ * setting rather than anything that changes with scale — vertically
+ * centered on the bottom edge of the title Verovio actually drew. Its
+ * font size is half the title's rendered height, so both position and
+ * size re-derive correctly any time this runs again after a
+ * rescale/redraw.
  *
- * @param {SVGElement|null} svgElement
+ * Rights/copyright: horizontally centered on the page, baseline
+ * sitting on the bottom margin. Capped at a small font size, and
+ * shrunk further if needed so the whole line fits between the left
+ * and right margins.
+ *
+ * @param {SVGElement|null} svgElement — must already be attached to
+ *   the live document (main.js calls this right after appendChild,
+ *   not before) — the bbox/text-measurement APIs need real layout.
  * @param {{composer: string|null, rights: string|null}} metadata
  * @param {{
  *   isFirstPage: boolean,
@@ -83,28 +171,43 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
   if (!width || !height) return; // no coordinate space to place text in safely
 
   // Scale factors from real millimeters into this SVG's own drawing
-  // units, so a marginRightMm of e.g. 12.7mm lands at the actual right
+  // units, so e.g. a marginRightMm of 12.7mm lands at the actual right
   // margin regardless of what internal unit scale Verovio drew in.
   const scaleX = width / layout.pageWidthMm;
   const scaleY = height / layout.pageHeightMm;
 
   if (metadata.composer) {
+    const titleBBox = getTitleBBox(svgElement);
+    // Fall back to a fixed size/position if the title line couldn't
+    // be found (e.g. Verovio's class naming changes in some future
+    // version) so composer still shows up somewhere reasonable rather
+    // than not at all.
+    const fontSize = titleBBox ? titleBBox.height / 2 : 4 * scaleY;
+    const centerY = titleBBox
+      ? titleBBox.y + titleBBox.height
+      : layout.marginTopMm * scaleY * 0.7;
+
     addText(svgElement, {
       text: metadata.composer,
-      x: width - layout.marginRightMm * scaleX,
-      y: layout.marginTopMm * scaleY * 0.7,
+      x: width - layout.marginRightMm * scaleX, // fixed to the right margin, independent of scale
+      y: centerY,
       anchor: "end",
-      fontSize: 4 * scaleY, // ~4mm cap height — in line with a composer credit
+      dominantBaseline: "central", // makes `y` the text's vertical center, not its baseline
+      fontSize,
     });
   }
 
   if (metadata.rights) {
-    addText(svgElement, {
+    const maxFontSize = 2.5 * scaleY; // "always small" cap
+    const rightsEl = addText(svgElement, {
       text: metadata.rights,
       x: width / 2,
-      y: height - layout.marginBottomMm * scaleY * 0.4,
+      y: height - layout.marginBottomMm * scaleY, // baseline sits on the bottom margin
       anchor: "middle",
-      fontSize: 2.5 * scaleY, // small print, conventional for a copyright line
+      fontSize: maxFontSize,
     });
+
+    const usableWidth = width - (layout.marginLeftMm + layout.marginRightMm) * scaleX;
+    shrinkToFit(rightsEl, usableWidth);
   }
 }
