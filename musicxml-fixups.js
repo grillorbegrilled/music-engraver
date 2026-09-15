@@ -15,8 +15,9 @@
  * new fixers here as new Verovio import quirks turn up — that's the
  * whole extension point for this file.
  */
-const FIXERS = [fixUnterminatedMeasureRepeats, fixZBuzzRollDirections,
-               fixBassDrumNoteheads, fixCymbalNoteheads, fixAllRestMeasures];
+const FIXERS = [fixUnterminatedMeasureRepeats, fixNumeralRepeatDirections,
+               fixZBuzzRollDirections, fixBassDrumNoteheads, fixCymbalNoteheads,
+               fixAllRestMeasures];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -191,6 +192,141 @@ function insertMeasureRepeatStop(doc, measure, key) {
   // measure that's entirely attributes/barline/print/sound with no
   // real content at all.
   measure.insertBefore(attributes, firstNonSwept ? firstNonSwept.nextElementSibling : null);
+}
+
+/**
+ * Shorthand repeat markings: a <direction> whose words are exactly "2"
+ * or "4" (nothing else) is a percussion-chart convention for "the next
+ * 2 (or 4) measures repeat the previous 2 (or 4) measures" — a numeral
+ * written over otherwise-blank placeholder measures instead of the
+ * proper <measure-repeat> encoding. Verovio doesn't understand that
+ * convention: it just prints a floating "2" or "4" above the staff and
+ * renders whatever's actually written in those measures (typically
+ * rests) instead of drawing the repeat-bar slashes.
+ *
+ * Fix: for each such direction, take the measure it's attached to plus
+ * the following (N - 1) measures in the same part (N = 2 or 4, read
+ * off the direction's text) as the placeholder block, then:
+ *   - delete the numeral <direction>
+ *   - open the block with <measure-repeat type="start" slashes="N">N</measure-repeat>
+ *     on the first measure of the block
+ *   - close it with an empty <measure-repeat type="stop"/> on the last
+ *     measure of the block
+ * slashes is set to N so the engraved symbol draws N diagonal slashes
+ * — unambiguous at a glance, rather than defaulting to a single slash
+ * that a 2- or 4-bar repeat could otherwise be misread as.
+ *
+ * The block's existing content (typically whole-measure rests) is left
+ * untouched. As with the single-measure <measure-repeat> elsewhere in
+ * this file, once the block is properly marked Verovio draws the
+ * repeat glyph and disregards whatever notes are actually written.
+ *
+ * If fewer than N measures remain in the part — a malformed or
+ * truncated marking — the direction is left in place rather than
+ * guessed at.
+ *
+ * @param {Document} doc
+ * @returns {number} number of numeral directions converted
+ */
+function fixNumeralRepeatDirections(doc) {
+  let fixes = 0;
+  const parts = Array.from(doc.getElementsByTagName("part"));
+
+  for (const part of parts) {
+    const measures = Array.from(part.getElementsByTagName("measure"));
+
+    for (let i = 0; i < measures.length; i++) {
+      // Snapshot per measure: removing a matched <direction> below
+      // must not disturb iteration over that same measure's other
+      // directions.
+      const directions = Array.from(measures[i].getElementsByTagName("direction"));
+      const match = directions.find((d) => numeralRepeatCount(d) !== null);
+      if (!match) continue;
+
+      const count = numeralRepeatCount(match);
+      if (i + count > measures.length) continue; // not enough measures left — leave marking in place
+
+      const staffNumber = directionStaffNumber(match);
+
+      match.parentNode.removeChild(match);
+
+      addMeasureRepeatMarker(doc, measures[i], "start", count, staffNumber, String(count));
+      addMeasureRepeatMarker(doc, measures[i + count - 1], "stop", count, staffNumber, "");
+
+      fixes++;
+    }
+  }
+
+  return fixes;
+}
+
+/**
+ * Returns 2 or 4 if `direction`'s combined <words> text (trimmed) is
+ * exactly "2" or "4", otherwise null. Mirrors isZOnlyDirection's
+ * all-or-nothing matching below: a direction mixing a numeral with any
+ * other text is left alone rather than guessed at.
+ */
+function numeralRepeatCount(direction) {
+  const directionTypes = Array.from(direction.getElementsByTagName("direction-type"));
+  if (directionTypes.length === 0) return null;
+
+  let text = "";
+  for (const directionType of directionTypes) {
+    for (const words of Array.from(directionType.getElementsByTagName("words"))) {
+      text += words.textContent;
+    }
+  }
+
+  text = text.trim();
+  return text === "2" || text === "4" ? Number(text) : null;
+}
+
+/**
+ * Reads the optional <staff> child some multi-staff-part directions
+ * carry, so an inserted <measure-repeat> can be scoped to the same
+ * staff the numeral marking was written on, via measure-style's
+ * "number" attribute. Returns null for single-staff parts, where
+ * measure-style's "number" attribute is omitted entirely — same
+ * "_default" convention fixUnterminatedMeasureRepeats uses above.
+ */
+function directionStaffNumber(direction) {
+  const staff = Array.from(direction.children).find((el) => el.tagName === "staff");
+  return staff ? staff.textContent.trim() : null;
+}
+
+/**
+ * Inserts a <measure-repeat> of the given type into `measure`, scoped
+ * to `staffNumber` when given. Reuses a leading <attributes> element
+ * if the measure already opens with one (the common case, since
+ * measure-level attributes conventionally come first); otherwise
+ * creates a fresh <attributes> as the very first child.
+ *
+ * Unlike insertMeasureRepeatStop above, this doesn't need to dodge
+ * Verovio's part-boundary StaffDef sweep — that sweep only mis-reads
+ * a *stop* leaking in from a different, already-finished part. Here
+ * both the start and stop stay within the same part's own written-out
+ * block, so a normal leading <attributes> is read correctly.
+ */
+function addMeasureRepeatMarker(doc, measure, type, count, staffNumber, text) {
+  const first = measure.firstElementChild;
+  let attributes;
+  if (first && first.tagName === "attributes") {
+    attributes = first;
+  } else {
+    attributes = doc.createElement("attributes");
+    measure.insertBefore(attributes, first || null); // insertBefore(x, null) appends
+  }
+
+  const style = doc.createElement("measure-style");
+  if (staffNumber) style.setAttribute("number", staffNumber);
+
+  const repeat = doc.createElement("measure-repeat");
+  repeat.setAttribute("type", type);
+  if (type === "start") repeat.setAttribute("slashes", String(count));
+  repeat.textContent = text;
+
+  style.appendChild(repeat);
+  attributes.appendChild(style);
 }
 
 /**
