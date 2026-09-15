@@ -596,7 +596,7 @@ function fixAllRestMeasures(doc) {
 }
 
 /**
- * Pulls the composer and rights/copyright text straight out of
+ * Pulls composer, arranger, and rights/copyright text straight out of
  * <identification> — the same fields the fixers above leave alone,
  * since they're already stored the standard way. Used by main.js to
  * feed score-overlay.js, which stamps this text directly onto the
@@ -607,27 +607,32 @@ function fixAllRestMeasures(doc) {
  * same as a normal "nothing to add" result from any fixer here.
  *
  * @param {string} xmlText
- * @returns {{composer: string|null, rights: string|null}}
+ * @returns {{composer: string|null, arranger: string|null, rights: string|null}}
  */
 export function extractScoreMetadata(xmlText) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlText, "application/xml");
 
   if (doc.getElementsByTagName("parsererror").length > 0) {
-    return { composer: null, rights: null };
+    return { composer: null, arranger: null, rights: null };
   }
 
   const creators = Array.from(doc.getElementsByTagName("creator"));
-  const composerEl = creators.find(
-    (el) => (el.getAttribute("type") || "").trim().toLowerCase() === "composer"
-  );
+  const findCreator = (type) =>
+    creators.find(
+      (el) => (el.getAttribute("type") || "").trim().toLowerCase() === type
+    );
+  const composerEl = findCreator("composer");
+  const arrangerEl = findCreator("arranger");
   const rightsEl = doc.getElementsByTagName("rights")[0];
 
   const composer = composerEl ? composerEl.textContent.trim() : "";
+  const arranger = arrangerEl ? arrangerEl.textContent.trim() : "";
   const rights = rightsEl ? rightsEl.textContent.trim() : "";
 
   return {
     composer: composer || null,
+    arranger: arranger || null,
     rights: rights || null,
   };
 }

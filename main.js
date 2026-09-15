@@ -26,7 +26,7 @@ let totalPages = 0;
 let loadedFileName = "score";
 // Composer/rights text pulled from the file at load time and stamped
 // onto page 1's SVG by renderAllPages() — see score-overlay.js.
-let currentMetadata = { composer: null, rights: null };
+let currentMetadata = { composer: null, arranger: null, rights: null };
 
 function currentSettings() {
   return {

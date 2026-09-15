@@ -154,6 +154,30 @@ function addText(svgElement, { text, x, y, anchor, fontSize, dominantBaseline })
 }
 
 /**
+ * Draws one or more lines of text as separate <text> elements, with
+ * the whole block vertically centered on `centerY` — used for the
+ * composer field, which becomes two lines ("by X" / "arr. Y") when
+ * there's an arranger, but still needs to center on the same point a
+ * single line would.
+ */
+function addCenteredTextBlock(svgElement, { lines, x, centerY, anchor, fontSize }) {
+  const lineHeight = fontSize * 1.2; // typical single-spaced line height
+  const totalHeight = lineHeight * lines.length;
+  const firstLineY = centerY - totalHeight / 2 + lineHeight / 2;
+
+  lines.forEach((line, i) => {
+    addText(svgElement, {
+      text: line,
+      x,
+      y: firstLineY + i * lineHeight,
+      anchor,
+      dominantBaseline: "central",
+      fontSize,
+    });
+  });
+}
+
+/**
  * Shrinks `textEl`'s font-size, if needed, so its rendered width fits
  * within `maxWidth` (in the same coordinate units as the SVG it's
  * in). `textEl` must already be attached to the live document —
@@ -188,7 +212,10 @@ function shrinkToFit(textEl, maxWidth) {
  * centered on the bottom edge of the title Verovio actually drew. Its
  * font size is half the title's rendered height, so both position and
  * size re-derive correctly any time this runs again after a
- * rescale/redraw.
+ * rescale/redraw. When both a composer and an arranger are present,
+ * this becomes two lines ("by {composer}" / "arr. {arranger}"),
+ * still centered on the same point a single line would be; with only
+ * a composer, it's just the name, unchanged from before.
  *
  * Rights/copyright: horizontally centered on the page, baseline
  * sitting on the bottom margin. Capped at a small font size, and
@@ -198,7 +225,7 @@ function shrinkToFit(textEl, maxWidth) {
  * @param {SVGElement|null} svgElement — must already be attached to
  *   the live document (main.js calls this right after appendChild,
  *   not before) — the bbox/text-measurement APIs need real layout.
- * @param {{composer: string|null, rights: string|null}} metadata
+ * @param {{composer: string|null, arranger: string|null, rights: string|null}} metadata
  * @param {{
  *   isFirstPage: boolean,
  *   marginTopMm: number,
@@ -225,12 +252,15 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
       ? titleBBox.y + titleBBox.height
       : layout.marginTopMm * scaleY * 0.7;
 
-    addText(svgElement, {
-      text: metadata.composer,
+    const lines = metadata.arranger
+      ? [`by ${metadata.composer}`, `arr. ${metadata.arranger}`]
+      : [metadata.composer];
+
+    addCenteredTextBlock(svgElement, {
+      lines,
       x: width - layout.marginRightMm * scaleX, // fixed to the right margin, independent of scale
-      y: centerY,
+      centerY,
       anchor: "end",
-      dominantBaseline: "central", // makes `y` the text's vertical center, not its baseline
       fontSize,
     });
   }
