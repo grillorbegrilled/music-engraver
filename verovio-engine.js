@@ -10,7 +10,7 @@
 import { preprocessMusicXml } from "./musicxml-fixups.js";
 
 const VEROVIO_SCRIPT_URL =
-  "https://cdn.jsdelivr.net/npm/verovio@5.2.0/dist/verovio-toolkit-wasm.js";
+  "https://cdn.jsdelivr.net/npm/verovio@6.3.0/dist/verovio-toolkit-wasm.js";
 
 let scriptLoadPromise = null;
 let toolkitReadyPromise = null;
