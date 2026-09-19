@@ -160,11 +160,7 @@ export async function loadScore(musicXmlText, settings) {
       "This file doesn't look like valid MusicXML (or another format Verovio understands)."
     );
   }
-console.log(
-  (tk.getMEI().match(/<measure[\s\S]*?<\/measure>/g) || [])
-    .filter((m) => /mRpt|multiRpt/.test(m))
-    .join("\n\n")
-);
+
   const pageCount = tk.getPageCount();
   if (!pageCount || pageCount < 1) {
     throw new Error("The file loaded, but no pages of music were produced.");
@@ -184,4 +180,33 @@ export function updateSettings(settings) {
 export function renderPage(pageNumber) {
   if (!toolkit) throw new Error("No score is loaded yet.");
   return toolkit.renderToSVG(pageNumber);
+}
+
+/**
+ * TEMP DEBUG (remove when repeat issue is solved): returns a compact
+ * text dump of the MEI measures Verovio produced that contain measure
+ * repeats, plus the measure right after each, so it can be shown on
+ * the page instead of the console.
+ */
+export function getRepeatDebugMei() {
+  if (!toolkit) return "No score loaded.";
+  const mei = toolkit.getMEI({ removeIds: true });
+  const measures = mei.match(/<measure\b[\s\S]*?<\/measure>/g) || [];
+  const count = (re) => (mei.match(re) || []).length;
+  const header =
+    `measures: ${measures.length}; ` +
+    `mRpt: ${count(/<mRpt\b/g)}, mRpt2: ${count(/<mRpt2\b/g)}, ` +
+    `multiRpt: ${count(/<multiRpt\b/g)}`;
+
+  const hit = new Set();
+  measures.forEach((m, i) => {
+    if (/<(mRpt2?|multiRpt)\b/.test(m)) {
+      hit.add(i);
+      if (i + 1 < measures.length) hit.add(i + 1);
+    }
+  });
+  const shown = [...hit].slice(0, 8).map(
+    (i) => `--- measure #${i + 1} in file order ---\n` + measures[i].replace(/\s+/g, " ")
+  );
+  return [header, ...shown].join("\n\n");
 }
