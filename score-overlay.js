@@ -52,7 +52,7 @@ function parseMmAttribute(value) {
  * priority instead, since it would then be the authoritative
  * coordinate space per spec.)
  */
-function getPageGeometry(svgElement) {
+export function getPageGeometry(svgElement) {
   const viewBox = svgElement.getAttribute("viewBox");
   let vbWidth = null;
   let vbHeight = null;

@@ -1,7 +1,7 @@
 // main.js
 import { loadScore, updateSettings, renderPage, PAGE_SIZE_MM } from "./verovio-engine.js";
 import { extractScoreMetadata } from "./musicxml-fixups.js";
-import { stampScoreMetadata } from "./score-overlay.js";
+import { stampScoreMetadata, getPageGeometry } from "./score-overlay.js";
 
 // -- element references ----------------------------------------------------
 
@@ -145,29 +145,30 @@ function yieldToMainThread() {
  * Creates a fully standalone, valid SVG string with explicit dimensions and namespace
  */
 function prepareStandaloneSvgString(svgElement, targetWidthPx, targetHeightPx) {
+  // Read the coordinate space off the ORIGINAL, still-connected svgElement,
+  // before cloning/detaching it — getPageGeometry (score-overlay.js) needs
+  // real layout (getBoundingClientRect) for its no-viewBox fallback, and a
+  // detached clone reports a zero-size rect. This app's Verovio output has
+  // no viewBox, so its width/height attributes are physical mm print sizes,
+  // not the content's coordinate-space size (see getPageGeometry's own
+  // comment) — parsing them directly, as this used to do, builds a viewBox
+  // that doesn't match the space stampScoreMetadata actually placed the
+  // composer/rights text in, so that text renders outside it and vanishes
+  // from the exported PDF while the on-screen SVG still shows it fine.
+  // Reusing getPageGeometry keeps this in one place instead of two
+  // independently-wrong copies of the same coordinate math.
+  const { width: nativeWidth, height: nativeHeight } = getPageGeometry(svgElement);
+
   const clone = svgElement.cloneNode(true);
 
   // Ensure standard SVG XML namespace attributes exist
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
-  // Get current width/height or viewBox
-  const viewBox = clone.getAttribute("viewBox");
-  let nativeWidth = parseFloat(clone.getAttribute("width"));
-  let nativeHeight = parseFloat(clone.getAttribute("height"));
-
-  if ((!nativeWidth || !nativeHeight) && viewBox) {
-    const parts = viewBox.split(/\s+/).map(Number);
-    if (parts.length === 4) {
-      nativeWidth = parts[2];
-      nativeHeight = parts[3];
-    }
-  }
-
   // Explicitly set absolute pixel dimensions on the SVG element
   clone.setAttribute("width", `${targetWidthPx}px`);
   clone.setAttribute("height", `${targetHeightPx}px`);
-  
+
   if (!clone.getAttribute("viewBox") && nativeWidth && nativeHeight) {
     clone.setAttribute("viewBox", `0 0 ${nativeWidth} ${nativeHeight}`);
   }
