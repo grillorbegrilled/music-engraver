@@ -160,7 +160,11 @@ export async function loadScore(musicXmlText, settings) {
       "This file doesn't look like valid MusicXML (or another format Verovio understands)."
     );
   }
-
+console.log(
+  (tk.getMEI().match(/<measure[\s\S]*?<\/measure>/g) || [])
+    .filter((m) => /mRpt|multiRpt/.test(m))
+    .join("\n\n")
+);
   const pageCount = tk.getPageCount();
   if (!pageCount || pageCount < 1) {
     throw new Error("The file loaded, but no pages of music were produced.");
