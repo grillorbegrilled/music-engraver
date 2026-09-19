@@ -7,7 +7,8 @@
 // Verovio is loaded from jsDelivr at runtime (not bundled), because this
 // project has no build step. See README-spike.md for why.
 
-import { preprocessMusicXml } from "./musicxml-fixups.js";
+import { preprocessMusicXmlDetailed } from "./musicxml-fixups.js";
+import { applyTwoMeasureRepeats } from "./mei-repeats.js";
 
 const VEROVIO_SCRIPT_URL =
   "https://cdn.jsdelivr.net/npm/verovio@6.3.0/dist/verovio-toolkit-wasm.js";
@@ -15,6 +16,11 @@ const VEROVIO_SCRIPT_URL =
 let scriptLoadPromise = null;
 let toolkitReadyPromise = null;
 let toolkit = null;
+// Multi-measure repeat blocks found while preprocessing the loaded score
+// (see mei-repeats.js for why they're needed after import).
+let repeatBlocks = [];
+// Plain-text summary of the last MEI repeat pass (shown by the debug box).
+let repeatReport = "";
 
 /**
  * Injects the Verovio <script> tag once and resolves when the global
@@ -146,13 +152,21 @@ export async function loadScore(musicXmlText, settings) {
   const tk = await getToolkit();
   tk.setOptions(buildVerovioOptions(settings));
 
-  const patchedXmlText = preprocessMusicXml(musicXmlText);
+  const { xml: patchedXmlText, repeatBlocks: blocks } = preprocessMusicXmlDetailed(musicXmlText);
+  repeatBlocks = blocks;
 
   let loaded;
   try {
     loaded = tk.loadData(patchedXmlText);
   } catch (err) {
     throw new Error("Verovio could not parse this file's musical content.");
+  }
+
+  // Verovio's MusicXML importer draws a 2-measure repeat as two separate
+  // one-bar signs. Round-trip through MEI to turn those pairs into a real
+  // <mRpt2/>. If anything goes wrong, fall back to the plain import.
+  if (loaded) {
+    loaded = applyTwoBarRepeatsViaMei(tk, patchedXmlText, repeatBlocks);
   }
 
   if (!loaded) {
@@ -182,11 +196,41 @@ export function renderPage(pageNumber) {
   return toolkit.renderToSVG(pageNumber);
 }
 
+/** 2-/4-measure repeat blocks in the currently loaded score. */
+export function getRepeatBlocks() {
+  return repeatBlocks;
+}
+
+
 /**
- * TEMP DEBUG (remove when repeat issue is solved): returns a compact
- * text dump of the MEI measures Verovio produced that contain measure
- * repeats, plus the measure right after each, so it can be shown on
- * the page instead of the console.
+ * Re-loads the toolkit from edited MEI so 2-measure repeats become
+ * <mRpt2/>. Returns whether the toolkit ends up with a loaded score.
+ * Never throws: on any failure the original MusicXML is loaded again.
+ */
+function applyTwoBarRepeatsViaMei(tk, musicXmlText, blocks) {
+  const twoBar = blocks.filter((b) => b.count === 2);
+  repeatReport = `2-bar blocks found: ${twoBar.length}`;
+  if (twoBar.length === 0) return true;
+
+  try {
+    const mei = tk.getMEI({ removeIds: true });
+    const result = applyTwoMeasureRepeats(mei, twoBar);
+    repeatReport +=
+      `; applied: ${result.applied.length}` +
+      result.skipped.map((s) => `\n  skipped ${s.label}: ${s.reason}`).join("");
+    if (result.applied.length === 0) return true; // nothing changed; keep as loaded
+    if (tk.loadData(result.mei)) return true;
+    repeatReport += "\n  edited MEI failed to load; fell back to plain import";
+  } catch (err) {
+    repeatReport += `\n  MEI step threw (${err.message}); fell back to plain import`;
+  }
+  return tk.loadData(musicXmlText);
+}
+
+/**
+ * TEMP DEBUG (remove when the repeat work is done): compact text dump
+ * of the MEI staves that hold repeat elements, plus the outcome of the
+ * 2-bar MEI pass, for display on the page instead of the console.
  */
 export function getRepeatDebugMei() {
   if (!toolkit) return "No score loaded.";
@@ -196,17 +240,15 @@ export function getRepeatDebugMei() {
   const header =
     `measures: ${measures.length}; ` +
     `mRpt: ${count(/<mRpt\b/g)}, mRpt2: ${count(/<mRpt2\b/g)}, ` +
-    `multiRpt: ${count(/<multiRpt\b/g)}`;
+    `mSpace: ${count(/<mSpace\b/g)}, multiRpt: ${count(/<multiRpt\b/g)}`;
 
-  const hit = new Set();
+  const repeatEl = /<(mRpt2?|mSpace|multiRpt)\b/;
+  const lines = [header, repeatReport];
   measures.forEach((m, i) => {
-    if (/<(mRpt2?|multiRpt)\b/.test(m)) {
-      hit.add(i);
-      if (i + 1 < measures.length) hit.add(i + 1);
-    }
+    if (!repeatEl.test(m)) return;
+    const staves = (m.match(/<staff\b[\s\S]*?<\/staff>/g) || []).filter((st) => repeatEl.test(st));
+    const n = (/<measure\b[^>]*\bn="([^"]*)"/.exec(m) || [])[1] || String(i + 1);
+    lines.push(`m${n} (#${i + 1}): ` + staves.map((st) => st.replace(/\s+/g, " ")).join(" "));
   });
-  const shown = [...hit].slice(0, 8).map(
-    (i) => `--- measure #${i + 1} in file order ---\n` + measures[i].replace(/\s+/g, " ")
-  );
-  return [header, ...shown].join("\n\n");
+  return lines.join("\n");
 }
