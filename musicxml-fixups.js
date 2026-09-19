@@ -15,7 +15,11 @@
  * new fixers here as new Verovio import quirks turn up — that's the
  * whole extension point for this file.
  */
-const FIXERS = [fixUnterminatedMeasureRepeats, fixNumeralRepeatDirections,
+// Order matters for the first two: fixNumeralRepeatDirections can leave
+// a <measure-repeat> open through the end of a part (legal by spec), so
+// it must run BEFORE fixUnterminatedMeasureRepeats, which then patches
+// the resulting cross-part leak.
+const FIXERS = [fixNumeralRepeatDirections, fixUnterminatedMeasureRepeats,
                fixZBuzzRollDirections, fixBassDrumNoteheads, fixCymbalNoteheads,
                fixAllRestMeasures];
 
@@ -210,8 +214,14 @@ function insertMeasureRepeatStop(doc, measure, key) {
  *   - delete the numeral <direction>
  *   - open the block with <measure-repeat type="start" slashes="N">N</measure-repeat>
  *     on the first measure of the block
- *   - close it with an empty <measure-repeat type="stop"/> on the last
- *     measure of the block
+ *   - close it with an empty <measure-repeat type="stop"/> on the
+ *     measure AFTER the block. Per the MusicXML spec, "stop" marks the
+ *     first measure where the repeat is no longer displayed, so putting
+ *     it on the block's own last measure would cut the repeat short.
+ *     If the block runs to the end of the part there is no such
+ *     measure, and the stop is omitted (legal by spec);
+ *     fixUnterminatedMeasureRepeats, which runs after this fixer,
+ *     handles the resulting cross-part leak in Verovio.
  * slashes is set to N so the engraved symbol draws N diagonal slashes
  * — unambiguous at a glance, rather than defaulting to a single slash
  * that a 2- or 4-bar repeat could otherwise be misread as.
@@ -251,7 +261,15 @@ function fixNumeralRepeatDirections(doc) {
       match.parentNode.removeChild(match);
 
       addMeasureRepeatMarker(doc, measures[i], "start", count, staffNumber, String(count));
-      addMeasureRepeatMarker(doc, measures[i + count - 1], "stop", count, staffNumber, "");
+
+      // Stop goes on the first measure AFTER the block. If that measure
+      // holds the next numeral block's direction, its own start is
+      // appended after this stop (loop runs in document order), so
+      // stop-then-start ordering is preserved within the measure.
+      const stopIndex = i + count;
+      if (stopIndex < measures.length) {
+        addMeasureRepeatMarker(doc, measures[stopIndex], "stop", count, staffNumber, "");
+      }
 
       fixes++;
     }
