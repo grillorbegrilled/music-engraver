@@ -17,7 +17,7 @@
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixNumeralRepeatDirections,
                fixZBuzzRollDirections, fixBassDrumNoteheads, fixCymbalNoteheads,
-               fixAllRestMeasures];
+               fixAllRestMeasures, fixSoundOnlyNavigationMarks];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -729,6 +729,244 @@ function fixAllRestMeasures(doc) {
   }
 
   return fixes;
+}
+
+/**
+ * Navigation-mark workaround: some exporters (Flat, confirmed on
+ * several real files) write segno / coda / D.S. / D.C. / To Coda /
+ * Fine purely as <sound> attributes — real jump semantics for
+ * playback — but never write the visual that a well-behaved exporter
+ * puts next to them (no <segno/> glyph, no <coda/> glyph, no
+ * <words>D.S.</words>, ...). Verovio only draws what's in a
+ * <direction-type>, so on screen and in the PDF the structure just
+ * silently isn't there.
+ *
+ * Fix: for every <sound> carrying one of those attributes, synthesize
+ * the missing visual as an ordinary <direction placement="above">.
+ * The <sound> itself is never moved, edited, or removed — this only
+ * adds the visual, it doesn't reinterpret or drop playback data.
+ *
+ * | attribute   | visual                                           |
+ * | segno       | <segno/> glyph                                   |
+ * | coda        | <coda/> glyph                                    |
+ * | dalsegno    | "D.S." (+ " al Coda" / " al Fine", see below)    |
+ * | dacapo      | "D.C." (+ " al Coda" / " al Fine", see below)    |
+ * | tocoda      | "To Coda"                                        |
+ * | fine        | "Fine"                                           |
+ *
+ * D.S./D.C. suffix: " al Coda" if any <sound> in the document has a
+ * tocoda, else " al Fine" if any has a fine, else no suffix. A single
+ * piece won't realistically mix both endings, so a document-wide check
+ * is enough — no matching by token value across independent
+ * navigation structures.
+ *
+ * Two shapes of <sound> are handled, both spec-legal:
+ *   - <direction><...><sound/></direction>: the visual is added as a
+ *     new <direction-type> among the direction's existing leading
+ *     <direction-type> children (the content model is
+ *     direction-type+, offset?, ..., staff?, sound?, so appending after
+ *     <staff>/<sound> would be invalid). Skipped for an attribute
+ *     whose visual is already there (the matching glyph for
+ *     segno/coda; any <words> for the textual ones) so authored
+ *     content is never overwritten.
+ *   - <measure><sound/></measure> (the bare shape Flat writes): a new
+ *     <direction> is inserted at the measure's "header block" — after
+ *     the leading attributes/print/sound/left-barline run, before the
+ *     first real content.
+ *
+ * Idempotent, which matters: loadScore() runs preprocessMusicXml()
+ * again on text that's already been fixed. Because the bare <sound>
+ * stays put, it would keep triggering a fresh synthesis on every run
+ * — so for that shape the measure is first checked for a <direction>
+ * that already carries the visual (matching glyph; for the textual
+ * ones, <words> in the same family — see NAV_WORDS_FAMILY). Barline
+ * <segno>/<coda> children are deliberately not counted: only
+ * <direction-type> content is known to render.
+ *
+ * Known placement limitation: the new direction always lands at the
+ * start of its measure, even for marks (Fine, D.S., D.C., To Coda)
+ * that engraving convention puts at the measure's right edge.
+ *
+ * @param {Document} doc
+ * @returns {number} number of visuals synthesized
+ */
+function fixSoundOnlyNavigationMarks(doc) {
+  const sounds = Array.from(doc.getElementsByTagName("sound")).filter((sound) => {
+    const parentTag = sound.parentNode && sound.parentNode.tagName;
+    return parentTag === "measure" || parentTag === "direction";
+  });
+
+  const anyToCoda = sounds.some((sound) => hasNavAttr(sound, "tocoda"));
+  const anyFine = sounds.some((sound) => hasNavAttr(sound, "fine"));
+  const suffix = anyToCoda ? " al Coda" : anyFine ? " al Fine" : "";
+
+  // Where new directions go in each measure, computed once per
+  // measure so several marks in the same measure keep document order
+  // instead of each one being inserted in front of the previous one.
+  const headerInsertionPoints = new Map();
+
+  let fixes = 0;
+
+  for (const sound of sounds) {
+    const visuals = navVisualsFor(sound, suffix);
+    if (visuals.length === 0) continue;
+
+    const parent = sound.parentNode;
+
+    if (parent.tagName === "direction") {
+      // Decide everything up front: adding one visual must not change
+      // the "already has <words>?" answer for the next.
+      const missing = visuals.filter((v) => !directionHasNavVisual(parent, v));
+      for (const visual of missing) {
+        addNavVisualToDirection(doc, parent, visual);
+        fixes++;
+      }
+      continue;
+    }
+
+    // parent is <measure>: the bare shape.
+    if (!headerInsertionPoints.has(parent)) {
+      headerInsertionPoints.set(parent, firstNonHeaderChild(parent));
+    }
+    const before = headerInsertionPoints.get(parent);
+
+    for (const visual of visuals) {
+      if (measureHasNavVisual(parent, visual)) continue;
+
+      const direction = doc.createElement("direction");
+      direction.setAttribute("placement", "above");
+      direction.appendChild(buildNavDirectionType(doc, visual));
+      parent.insertBefore(direction, before); // insertBefore(x, null) appends
+      fixes++;
+    }
+  }
+
+  return fixes;
+}
+
+// Order here is the order visuals are produced when one <sound>
+// carries several attributes.
+const NAV_ATTRS = ["segno", "coda", "dalsegno", "dacapo", "tocoda", "fine"];
+
+/**
+ * Normalized-<words> patterns meaning "this text is already the visual
+ * for this attribute". Normalization = lowercase, everything except
+ * a-z/0-9 stripped, so "D.S. al Coda", "d.s.", and "DS al Fine" all
+ * start with "ds". Small, explicit vocabulary on purpose — used only
+ * to avoid double-drawing a mark that's already written out, never to
+ * decide that something *is* a navigation mark.
+ */
+const NAV_WORDS_FAMILY = {
+  dalsegno: /^(ds|dalsegno)/,
+  dacapo: /^(dc|dacapo)/,
+  tocoda: /^tocoda/,
+  fine: /^fine$/,
+};
+
+/**
+ * True if `sound` carries a meaningful value for navigation attribute
+ * `name`. dacapo and fine are yes/no-style flags in practice, so an
+ * explicit "no" doesn't count; empty values never do.
+ */
+function hasNavAttr(sound, name) {
+  const value = (sound.getAttribute(name) || "").trim().toLowerCase();
+  if (value === "") return false;
+  if ((name === "dacapo" || name === "fine") && value === "no") return false;
+  return true;
+}
+
+/**
+ * The visuals `sound` needs, as {attr, kind, text?} in NAV_ATTRS order.
+ * kind is the element to draw: "segno" / "coda" glyphs, or "words".
+ */
+function navVisualsFor(sound, suffix) {
+  const visuals = [];
+  for (const attr of NAV_ATTRS) {
+    if (!hasNavAttr(sound, attr)) continue;
+    if (attr === "segno") visuals.push({ attr, kind: "segno" });
+    else if (attr === "coda") visuals.push({ attr, kind: "coda" });
+    else if (attr === "dalsegno") visuals.push({ attr, kind: "words", text: "D.S." + suffix });
+    else if (attr === "dacapo") visuals.push({ attr, kind: "words", text: "D.C." + suffix });
+    else if (attr === "tocoda") visuals.push({ attr, kind: "words", text: "To Coda" });
+    else if (attr === "fine") visuals.push({ attr, kind: "words", text: "Fine" });
+  }
+  return visuals;
+}
+
+/** Builds <direction-type><segno/> | <coda/> | <words>text</words></direction-type>. */
+function buildNavDirectionType(doc, visual) {
+  const directionType = doc.createElement("direction-type");
+  const content = doc.createElement(visual.kind);
+  if (visual.kind === "words") content.textContent = visual.text;
+  directionType.appendChild(content);
+  return directionType;
+}
+
+/** <direction-type> children of `direction`, in order. */
+function directionTypesOf(direction) {
+  return Array.from(direction.children).filter((el) => el.tagName === "direction-type");
+}
+
+/**
+ * Sound-inside-direction case: does this direction already show the
+ * visual? Glyph marks need the matching glyph; textual marks are
+ * satisfied by any <words> (the author wrote something next to the
+ * sound — respect it).
+ */
+function directionHasNavVisual(direction, visual) {
+  return directionTypesOf(direction).some((dt) =>
+    Array.from(dt.children).some((el) => el.tagName === visual.kind)
+  );
+}
+
+/**
+ * Bare-sound case: does any <direction> in this measure already show
+ * the visual? Glyph marks need the matching glyph; textual marks need
+ * <words> in the same family (NAV_WORDS_FAMILY) — stricter than the
+ * sound-inside-direction check, since here the words aren't tied to
+ * the sound and could be unrelated text (an "rit." in the same
+ * measure must not suppress a D.S.).
+ */
+function measureHasNavVisual(measure, visual) {
+  const directions = Array.from(measure.children).filter((el) => el.tagName === "direction");
+  return directions.some((direction) =>
+    directionTypesOf(direction).some((dt) =>
+      Array.from(dt.children).some((el) => {
+        if (el.tagName !== visual.kind) return false;
+        if (visual.kind !== "words") return true;
+        const normalized = el.textContent.toLowerCase().replace(/[^a-z0-9]/g, "");
+        return NAV_WORDS_FAMILY[visual.attr].test(normalized);
+      })
+    )
+  );
+}
+
+/** Adds the visual as a new <direction-type> right after the direction's last existing one. */
+function addNavVisualToDirection(doc, direction, visual) {
+  const existing = directionTypesOf(direction);
+  const last = existing[existing.length - 1];
+  const newType = buildNavDirectionType(doc, visual);
+  direction.insertBefore(newType, last ? last.nextSibling : direction.firstChild);
+}
+
+/**
+ * First child of `measure` past its leading header run of
+ * attributes / print / sound / left-<barline>, or null if the whole
+ * measure is header. New directions go right before this node, so
+ * the leading run Verovio's StaffDef pre-pass sweeps over (see
+ * insertMeasureRepeatStop) stays intact. A right <barline> stops the
+ * run, so a note-less measure still gets its direction ahead of its
+ * closing barline rather than after it.
+ */
+function firstNonHeaderChild(measure) {
+  const headerTags = new Set(["attributes", "print", "sound"]);
+  return (
+    Array.from(measure.children).find((el) => {
+      if (headerTags.has(el.tagName)) return false;
+      if (el.tagName === "barline") return (el.getAttribute("location") || "right") !== "left";
+      return true;
+    }) || null
+  );
 }
 
 /**
