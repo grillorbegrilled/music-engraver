@@ -17,7 +17,8 @@
  */
 const FIXERS = [fixUnterminatedMeasureRepeats, fixNumeralRepeatDirections,
                fixZBuzzRollDirections, fixBassDrumNoteheads, fixCymbalNoteheads,
-               fixAllRestMeasures, fixSoundOnlyNavigationMarks];
+               fixAllRestMeasures, fixSoundOnlyNavigationMarks,
+               fixTempoChangeDirectionPlacement];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -1017,6 +1018,62 @@ function firstNonHeaderChild(measure) {
       return true;
     }) || null
   );
+}
+
+/**
+ * Words that mark a tempo change, matched as a prefix of the
+ * normalized (trimmed, lowercased) <words> text. Small, explicit
+ * vocabulary on purpose — not a guess at arbitrary expressive text.
+ * Prefix match also covers extended forms: "accel. poco a poco",
+ * "ritardando", "rallentando", and "ritenuto" (which gets the same
+ * below-staff treatment by the same convention).
+ */
+const TEMPO_CHANGE_PREFIXES = ["accel", "rit", "rall"];
+
+/**
+ * Moves accel./rit./rall. markings below the staff. These are
+ * hand-authored (Flat's exporter doesn't emit them at all), and
+ * hand-authored <direction>s default to placement="above" or leave it
+ * unspecified. The markings are already complete and well-formed —
+ * this only normalizes placement, it doesn't add or remove content.
+ *
+ * A <direction> matches if any of its <direction-type> children is a
+ * <words> whose normalized text starts with one of
+ * TEMPO_CHANGE_PREFIXES. Everything else (dynamics, rehearsal
+ * marks, other text) is left untouched. Idempotent: an already-below
+ * direction is skipped and not counted.
+ *
+ * Known limitation: a multi-measure marking authored as a start/stop
+ * <dashes> pair only has its start <direction> matched (that's the
+ * one carrying the <words>). The stop direction, typically a bare
+ * <dashes type="stop"/>, keeps its own placement and can end up
+ * mismatched with its start. Closing the gap would mean matching a
+ * <dashes> sharing a `number` attribute with an already-matched
+ * start and inheriting its placement. Not handled yet.
+ *
+ * @param {Document} doc
+ * @returns {number} number of directions whose placement was changed
+ */
+function fixTempoChangeDirectionPlacement(doc) {
+  let fixes = 0;
+
+  for (const direction of Array.from(doc.getElementsByTagName("direction"))) {
+    const isTempoChange = directionTypesOf(direction).some((dt) =>
+      Array.from(dt.children).some((el) => {
+        if (el.tagName !== "words") return false;
+        const text = el.textContent.trim().toLowerCase();
+        return TEMPO_CHANGE_PREFIXES.some((prefix) => text.startsWith(prefix));
+      })
+    );
+    if (!isTempoChange) continue;
+
+    if (direction.getAttribute("placement") !== "below") {
+      direction.setAttribute("placement", "below");
+      fixes++;
+    }
+  }
+
+  return fixes;
 }
 
 /**
