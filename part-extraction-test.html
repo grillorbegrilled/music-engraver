@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Part extraction check (plan step 5)</title>
+    <style>
+      :root {
+        --bg: #fbfbfa; --ink: #1f2328; --muted: #656d76; --line: #d8dee4;
+        --pass: #1a7f37; --fail: #cf222e; --panel: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14171a; --ink: #e6e8ea; --muted: #9aa4ae; --line: #2c333a;
+          --pass: #3fb950; --fail: #ff7b72; --panel: #1b1f23;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--ink);
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 900px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      h2 { font-size: 17px; margin: 0 0 8px; }
+      p.lede { margin: 0 0 20px; color: var(--muted); max-width: 70ch; }
+      section {
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 6px; padding: 16px; margin-bottom: 16px;
+      }
+      button, input[type="file"]::file-selector-button {
+        font: inherit; padding: 6px 12px; border: 1px solid var(--line);
+        border-radius: 6px; background: var(--panel); color: var(--ink); cursor: pointer;
+      }
+      .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { font-weight: 600; }
+      .badge {
+        display: inline-block; min-width: 44px; text-align: center; font-size: 12px;
+        font-weight: 700; padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor;
+      }
+      .pass { color: var(--pass); }
+      .fail { color: var(--fail); }
+      .info { color: var(--muted); }
+      .detail { color: var(--muted); font-size: 13px; }
+      .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; margin-top: 8px; }
+      .pages figure { margin: 0; }
+      .pages img { width: 100%; height: auto; background: #fff; border: 1px solid var(--line); }
+      .pages figcaption { font-size: 12px; color: var(--muted); }
+      code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Part extraction check</h1>
+      <p class="lede">
+        Plan step 5. Pick one or more MusicXML files. Each goes through
+        <code>preprocessMusicXml()</code> then <code>extractParts()</code>, and every extracted
+        part is loaded into Verovio on its own and drawn (page 1 only). Serve from the same
+        folder as <code>verovio-engine.js</code>, <code>musicxml-fixups.js</code> and
+        <code>part-extraction.js</code>, over http (<code>python -m http.server</code>).
+        Layout here is a rough landscape Letter stand-in, not the final part layout (plan §4.2 and §4.3).
+      </p>
+
+      <div class="toolbar">
+        <input id="files" type="file" multiple accept=".xml,.musicxml" disabled />
+        <button id="copy" type="button">Copy results as text</button>
+        <span id="status" class="detail">Starting Verovio…</span>
+      </div>
+
+      <div id="out"></div>
+    </main>
+
+    <script type="module">
+      import { getToolkit, PAGE_SIZE_MM } from "./verovio-engine.js";
+      import { preprocessMusicXml } from "./musicxml-fixups.js";
+      import { extractParts } from "./part-extraction.js";
+
+      const report = [];
+      const outEl = document.getElementById("out");
+      const statusEl = document.getElementById("status");
+      let tk = null;
+
+      function el(tag, attrs = {}, ...children) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) {
+          if (k === "class") node.className = v;
+          else node.setAttribute(k, v);
+        }
+        for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        return node;
+      }
+
+      function badge(status) {
+        return el("span", { class: `badge ${status === "PASS" ? "pass" : status === "FAIL" ? "fail" : "info"}` }, status);
+      }
+
+      // Rough landscape-Letter layout with multi-system flow, close to what
+      // part-renderer.js will use later, but a fixed scale (no auto-fit yet).
+      function partOptions() {
+        const w = Math.round(PAGE_SIZE_MM.height * 10);
+        const h = Math.round(PAGE_SIZE_MM.width * 10);
+        return {
+          pageWidth: w, pageHeight: h,
+          pageMarginTop: 120, pageMarginBottom: 120, pageMarginLeft: 250, pageMarginRight: 250,
+          scale: 40, scaleToPageSize: true,
+          systemMaxPerPage: 0, minLastJustification: 0.8, justifyVertically: true,
+          breaks: "auto", adjustPageHeight: false, mmOutput: true,
+          header: "auto", footer: "none", multiRestStyle: "block",
+        };
+      }
+
+      function svgText(svgStr) {
+        const doc = new DOMParser().parseFromString(svgStr, "image/svg+xml");
+        return [...doc.querySelectorAll("text")].map((t) => t.textContent).join(" ").replace(/\s+/g, " ");
+      }
+
+      function svgUrl(svgStr) {
+        return URL.createObjectURL(new Blob([svgStr], { type: "image/svg+xml" }));
+      }
+
+      // XML-level checks on the ORIGINAL vs each extracted part.
+      function xmlChecks(srcDoc, part) {
+        const d = new DOMParser().parseFromString(part.xmlText, "application/xml");
+        const checks = [];
+        const wellFormed = !d.querySelector("parsererror");
+        checks.push(["well-formed", wellFormed]);
+        if (!wellFormed) return checks;
+        const srcPart = [...srcDoc.getElementsByTagName("part")].find((p) => p.getAttribute("id") === part.id);
+        checks.push(["1 score-part, 1 part", d.getElementsByTagName("score-part").length === 1 && d.getElementsByTagName("part").length === 1]);
+        checks.push(["no part-group", d.getElementsByTagName("part-group").length === 0]);
+        checks.push([
+          "measure count matches source",
+          !!srcPart && d.getElementsByTagName("measure").length === srcPart.getElementsByTagName("measure").length,
+        ]);
+        const srcWork = srcDoc.getElementsByTagName("work-title")[0];
+        const newWork = d.getElementsByTagName("work-title")[0];
+        checks.push(["title kept", (srcWork ? srcWork.textContent : "") === (newWork ? newWork.textContent : "")]);
+        checks.push([
+          "credits kept",
+          srcDoc.getElementsByTagName("credit").length === d.getElementsByTagName("credit").length,
+        ]);
+        return checks;
+      }
+
+      async function checkFile(file) {
+        const S = file.name;
+        const block = el("section", {}, el("h2", {}, file.name));
+        outEl.append(block);
+        try {
+          const raw = await file.text();
+          const fixed = preprocessMusicXml(raw);
+          const srcDoc = new DOMParser().parseFromString(fixed, "application/xml");
+          const srcPartCount = srcDoc.getElementsByTagName("part").length;
+          const workTitle = (srcDoc.getElementsByTagName("work-title")[0] || {}).textContent || "";
+
+          const t0 = performance.now();
+          const parts = extractParts(fixed);
+          const ms = Math.round(performance.now() - t0);
+          const countOk = parts.length === srcPartCount;
+          block.append(
+            el("div", {}, badge(countOk ? "PASS" : "FAIL"), ` ${parts.length} parts extracted from ${srcPartCount} <part> elements (${ms} ms)`)
+          );
+          report.push(`[${countOk ? "PASS" : "FAIL"}] ${S}: ${parts.length} parts extracted, ${srcPartCount} in source, ${ms} ms`);
+
+          const table = el(
+            "table", {},
+            el("thead", {}, el("tr", {},
+              el("th", {}, "#"), el("th", {}, "Part"), el("th", {}, "XML checks"),
+              el("th", {}, "Verovio load"), el("th", {}, "Pages"),
+              el("th", {}, "Title drawn"), el("th", {}, "Part name drawn by Verovio")))
+          );
+          const tbody = el("tbody");
+          table.append(tbody);
+          const gallery = el("div", { class: "pages" });
+
+          for (let i = 0; i < parts.length; i++) {
+            const p = parts[i];
+            statusEl.textContent = `${S}: rendering part ${i + 1} of ${parts.length} (${p.name})`;
+            await new Promise((r) => setTimeout(r, 0));
+
+            const xc = xmlChecks(srcDoc, p);
+            const xcFail = xc.filter(([, okk]) => !okk).map(([n]) => n);
+
+            let loaded = false, pageCount = 0, titleDrawn = "-", nameDrawn = "-", loadErr = "";
+            let svg1 = null;
+            try {
+              tk.setOptions(partOptions());
+              loaded = !!tk.loadData(p.xmlText);
+              if (loaded) {
+                pageCount = tk.getPageCount();
+                svg1 = tk.renderToSVG(1);
+                const text = svgText(svg1);
+                titleDrawn = workTitle ? (text.includes(workTitle) ? "yes" : "no") : "n/a";
+                nameDrawn = text.toLowerCase().includes(p.name.toLowerCase()) ? "yes" : "no";
+              }
+            } catch (err) {
+              loadErr = String(err && err.message ? err.message : err);
+            }
+
+            const passed = xcFail.length === 0 && loaded && pageCount >= 1;
+            tbody.append(
+              el("tr", {},
+                el("td", {}, i + 1),
+                el("td", {}, `${p.name} (${p.id})`),
+                el("td", {}, xcFail.length ? el("span", { class: "fail" }, "failed: " + xcFail.join(", ")) : "ok"),
+                el("td", {}, badge(loaded ? "PASS" : "FAIL"), loadErr ? ` ${loadErr}` : ""),
+                el("td", {}, pageCount || "-"),
+                el("td", {}, titleDrawn),
+                el("td", {}, nameDrawn))
+            );
+            report.push(
+              `[${passed ? "PASS" : "FAIL"}] ${S} / ${p.name} (${p.id}): xml=${xcFail.length ? "failed(" + xcFail.join("; ") + ")" : "ok"}, ` +
+                `load=${loaded}, pages=${pageCount}, titleDrawn=${titleDrawn}, partNameDrawn=${nameDrawn}${loadErr ? ", err=" + loadErr : ""}`
+            );
+            if (svg1) {
+              gallery.append(el("figure", {}, el("img", { src: svgUrl(svg1), alt: p.name }), el("figcaption", {}, `${p.name}, page 1 of ${pageCount}`)));
+            }
+          }
+
+          block.append(table);
+          block.append(el("div", { class: "detail" }, "\"Part name drawn by Verovio\" tells us whether Verovio's own staff label would collide with the planned stampPartName() overlay (plan §5, step 9)."));
+          block.append(gallery);
+        } catch (err) {
+          const msg = String(err && err.message ? err.message : err);
+          block.append(el("div", { class: "detail" }, "Error: " + msg));
+          report.push(`[FAIL] ${S}: ${msg}`);
+        }
+        statusEl.textContent = "Done.";
+      }
+
+      document.getElementById("files").addEventListener("change", async (e) => {
+        outEl.replaceChildren();
+        report.length = 0;
+        for (const f of [...e.target.files]) await checkFile(f);
+      });
+
+      document.getElementById("copy").addEventListener("click", async (e) => {
+        try {
+          await navigator.clipboard.writeText(report.join("\n"));
+          e.target.textContent = "Copied";
+        } catch (err) {
+          e.target.textContent = "Copy failed (see console)";
+          console.log(report.join("\n"));
+        }
+        setTimeout(() => (e.target.textContent = "Copy results as text"), 1800);
+      });
+
+      getToolkit().then(
+        (t) => {
+          tk = t;
+          statusEl.textContent = `Verovio ${tk.getVersion ? tk.getVersion() : ""} ready. Pick files.`;
+          document.getElementById("files").disabled = false;
+        },
+        (err) => (statusEl.textContent = "Could not start Verovio: " + (err && err.message ? err.message : err))
+      );
+    </script>
+  </body>
+</html>
