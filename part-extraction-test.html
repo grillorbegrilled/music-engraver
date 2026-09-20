@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Part extraction check (plan step 5)</title>
+    <title>Part extraction check (plan steps 5-6)</title>
     <style>
       :root {
         --bg: #fbfbfa; --ink: #1f2328; --muted: #656d76; --line: #d8dee4;
@@ -55,11 +55,13 @@
     <main>
       <h1>Part extraction check</h1>
       <p class="lede">
-        Plan step 5. Pick one or more MusicXML files. Each goes through
+        Plan steps 5 and 6. Pick one or more MusicXML files. Each goes through
         <code>preprocessMusicXml()</code> then <code>extractParts()</code>, and every extracted
         part is loaded into Verovio on its own and drawn (page 1 only). Serve from the same
         folder as <code>verovio-engine.js</code>, <code>musicxml-fixups.js</code> and
         <code>part-extraction.js</code>, over http (<code>python -m http.server</code>).
+        Step 6 adds a "Global marks" column: every part should carry the same rehearsal letters,
+        tempo/metronome, segno/coda and D.S./D.C./To Coda/Fine as every other part, measure by measure.
         Layout here is a rough landscape Letter stand-in, not the final part layout (plan §4.2 and §4.3).
       </p>
 
@@ -144,6 +146,68 @@
         return checks;
       }
 
+      // Step 6: independent re-detection of global marks in an extracted part
+      // (does not share code with part-extraction.js on purpose). One sorted
+      // signature list per measure. Words-only nav text (no <sound>) is not
+      // compared: by design it isn't propagated, so a part legitimately can
+      // differ there. Barline-child segno/coda are not global marks either.
+      const NAV_SOUND_ATTRS = ["tempo", "segno", "coda", "dalsegno", "dacapo", "tocoda", "fine"];
+      function globalSigs(xmlText) {
+        const d = new DOMParser().parseFromString(xmlText, "application/xml");
+        const norm = (t) => t.replace(/\s+/g, " ").trim();
+        return [...d.getElementsByTagName("measure")].map((m) => {
+          const sigs = new Set();
+          for (const node of m.getElementsByTagName("*")) {
+            const t = node.tagName;
+            const inDirType = node.parentNode.tagName === "direction-type";
+            if (t === "rehearsal") sigs.add("rehearsal:" + norm(node.textContent));
+            else if ((t === "segno" || t === "coda") && inDirType) sigs.add(t + " glyph");
+            else if (t === "metronome") sigs.add("metronome:" + norm(node.textContent));
+            else if (t === "sound") {
+              for (const a of NAV_SOUND_ATTRS) {
+                const v = (node.getAttribute(a) || "").trim().toLowerCase();
+                if (v && !((a === "dacapo" || a === "fine") && v === "no")) sigs.add(`sound ${a}=${v}`);
+              }
+            }
+          }
+          return [...sigs].sort();
+        });
+      }
+
+      // Every D.S./D.C./To Coda/Fine <sound> should have visible <words> in
+      // the same measure (fixSoundOnlyNavigationMarks + propagation).
+      function navSoundsMissingWords(xmlText) {
+        const d = new DOMParser().parseFromString(xmlText, "application/xml");
+        const fam = { dalsegno: /^(ds|dalsegno)/, dacapo: /^(dc|dacapo)/, tocoda: /^tocoda/, fine: /^fine$/ };
+        const missing = [];
+        [...d.getElementsByTagName("measure")].forEach((m, i) => {
+          const words = [...m.getElementsByTagName("words")].map((w) => w.textContent.toLowerCase().replace(/[^a-z0-9]/g, ""));
+          for (const snd of m.getElementsByTagName("sound")) {
+            for (const [a, re] of Object.entries(fam)) {
+              const v = (snd.getAttribute(a) || "").trim().toLowerCase();
+              if (v && !((a === "dacapo" || a === "fine") && v === "no") && !words.some((w) => re.test(w))) missing.push(`m${i + 1} ${a}`);
+            }
+          }
+        });
+        return missing;
+      }
+
+      // Compare each part's per-measure signatures to the union across parts.
+      function propagationChecks(parts) {
+        const sigs = parts.map((p) => globalSigs(p.xmlText));
+        const measureCount = Math.min(...sigs.map((s) => s.length));
+        const union = Array.from({ length: measureCount }, (_, i) => new Set(sigs.flatMap((s) => s[i])));
+        const totalMarks = union.reduce((n, u) => n + u.size, 0);
+        const perPart = sigs.map((s, pi) => {
+          const missing = [];
+          for (let i = 0; i < measureCount; i++) {
+            for (const sig of union[i]) if (!s[i].includes(sig)) missing.push(`m${i + 1} ${sig}`);
+          }
+          return { missing, navMissing: navSoundsMissingWords(parts[pi].xmlText) };
+        });
+        return { totalMarks, measureCount, perPart };
+      }
+
       async function checkFile(file) {
         const S = file.name;
         const block = el("section", {}, el("h2", {}, file.name));
@@ -164,12 +228,24 @@
           );
           report.push(`[${countOk ? "PASS" : "FAIL"}] ${S}: ${parts.length} parts extracted, ${srcPartCount} in source, ${ms} ms`);
 
+          const prop = parts.length ? propagationChecks(parts) : { totalMarks: 0, measureCount: 0, perPart: [] };
+          const propFails = prop.perPart.filter((r) => r.missing.length || r.navMissing.length).length;
+          block.append(
+            el("div", {}, badge(prop.totalMarks === 0 ? "INFO" : propFails === 0 ? "PASS" : "FAIL"),
+              prop.totalMarks === 0
+                ? " no global marks found in this file (nothing to propagate)"
+                : ` ${prop.totalMarks} distinct global mark(s) across ${prop.measureCount} measures; ` +
+                  (propFails === 0 ? "every part carries all of them" : `${propFails} part(s) missing some`))
+          );
+          report.push(`[${prop.totalMarks === 0 ? "INFO" : propFails === 0 ? "PASS" : "FAIL"}] ${S}: global marks: ${prop.totalMarks} distinct, ${propFails} part(s) missing some`);
+
           const table = el(
             "table", {},
             el("thead", {}, el("tr", {},
               el("th", {}, "#"), el("th", {}, "Part"), el("th", {}, "XML checks"),
               el("th", {}, "Verovio load"), el("th", {}, "Pages"),
-              el("th", {}, "Title drawn"), el("th", {}, "Part name drawn by Verovio")))
+              el("th", {}, "Title drawn"), el("th", {}, "Part name drawn by Verovio"),
+              el("th", {}, "Global marks")))
           );
           const tbody = el("tbody");
           table.append(tbody);
@@ -199,7 +275,14 @@
               loadErr = String(err && err.message ? err.message : err);
             }
 
-            const passed = xcFail.length === 0 && loaded && pageCount >= 1;
+            const pr = prop.perPart[i] || { missing: [], navMissing: [] };
+            const propBad = pr.missing.length + pr.navMissing.length > 0;
+            const propText = propBad
+              ? [pr.missing.length ? "missing: " + pr.missing.slice(0, 6).join("; ") + (pr.missing.length > 6 ? ` (+${pr.missing.length - 6} more)` : "") : "",
+                 pr.navMissing.length ? "sound without visual: " + pr.navMissing.slice(0, 6).join("; ") : ""].filter(Boolean).join(" | ")
+              : "ok";
+
+            const passed = xcFail.length === 0 && loaded && pageCount >= 1 && !propBad;
             tbody.append(
               el("tr", {},
                 el("td", {}, i + 1),
@@ -208,11 +291,12 @@
                 el("td", {}, badge(loaded ? "PASS" : "FAIL"), loadErr ? ` ${loadErr}` : ""),
                 el("td", {}, pageCount || "-"),
                 el("td", {}, titleDrawn),
-                el("td", {}, nameDrawn))
+                el("td", {}, nameDrawn),
+                el("td", {}, propBad ? el("span", { class: "fail" }, propText) : propText))
             );
             report.push(
               `[${passed ? "PASS" : "FAIL"}] ${S} / ${p.name} (${p.id}): xml=${xcFail.length ? "failed(" + xcFail.join("; ") + ")" : "ok"}, ` +
-                `load=${loaded}, pages=${pageCount}, titleDrawn=${titleDrawn}, partNameDrawn=${nameDrawn}${loadErr ? ", err=" + loadErr : ""}`
+                `load=${loaded}, pages=${pageCount}, titleDrawn=${titleDrawn}, partNameDrawn=${nameDrawn}, globalMarks=${propText}${loadErr ? ", err=" + loadErr : ""}`
             );
             if (svg1) {
               gallery.append(el("figure", {}, el("img", { src: svgUrl(svg1), alt: p.name }), el("figcaption", {}, `${p.name}, page 1 of ${pageCount}`)));

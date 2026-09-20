@@ -870,7 +870,7 @@ function fixSoundOnlyNavigationMarks(doc) {
 
 // Order here is the order visuals are produced when one <sound>
 // carries several attributes.
-const NAV_ATTRS = ["segno", "coda", "dalsegno", "dacapo", "tocoda", "fine"];
+export const NAV_ATTRS = ["segno", "coda", "dalsegno", "dacapo", "tocoda", "fine"];
 
 /**
  * Normalized-<words> patterns meaning "this text is already the visual
@@ -880,7 +880,7 @@ const NAV_ATTRS = ["segno", "coda", "dalsegno", "dacapo", "tocoda", "fine"];
  * to avoid double-drawing a mark that's already written out, never to
  * decide that something *is* a navigation mark.
  */
-const NAV_WORDS_FAMILY = {
+export const NAV_WORDS_FAMILY = {
   dalsegno: /^(ds|dalsegno)/,
   dacapo: /^(dc|dacapo)/,
   tocoda: /^tocoda/,
@@ -892,7 +892,7 @@ const NAV_WORDS_FAMILY = {
  * `name`. dacapo and fine are yes/no-style flags in practice, so an
  * explicit "no" doesn't count; empty values never do.
  */
-function hasNavAttr(sound, name) {
+export function hasNavAttr(sound, name) {
   const value = (sound.getAttribute(name) || "").trim().toLowerCase();
   if (value === "") return false;
   if ((name === "dacapo" || name === "fine") && value === "no") return false;
@@ -994,7 +994,7 @@ function addNavVisualToDirection(doc, direction, visual) {
  * with no notes has no separate end, so it falls back to the header
  * insertion point.
  */
-function endOfMeasureInsertionPoint(measure) {
+export function endOfMeasureInsertionPoint(measure) {
   const notes = Array.from(measure.children).filter((el) => el.tagName === "note");
   if (notes.length === 0) return firstNonHeaderChild(measure);
   return notes[notes.length - 1].nextElementSibling;
@@ -1009,7 +1009,7 @@ function endOfMeasureInsertionPoint(measure) {
  * run, so a note-less measure still gets its direction ahead of its
  * closing barline rather than after it.
  */
-function firstNonHeaderChild(measure) {
+export function firstNonHeaderChild(measure) {
   const headerTags = new Set(["attributes", "print", "sound"]);
   return (
     Array.from(measure.children).find((el) => {
