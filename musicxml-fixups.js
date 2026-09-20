@@ -675,15 +675,29 @@ function fixAllRestMeasures(doc) {
 
     if (voices.size > 1 || staffs.size > 1) continue;
 
-    // Use the duration from the existing rest. All the notes are rests,
-    // so preserve the duration of the first one as the measure duration.
+    // The replacement note has to last as long as everything it
+    // replaces, so total the durations of all the rests. (Copying the
+    // first rest's duration alone was a bug: a measure of four quarter
+    // rests came out as a whole-measure rest lasting one quarter.)
+    // A missing or unparseable duration on any rest means we can't
+    // know the real total, so leave the measure alone.
     const firstNote = notes[0];
 
-    const duration = Array.from(firstNote.children).find(
-      (el) => el.tagName === "duration"
-    );
+    let totalDuration = 0;
+    let durationsKnown = true;
+    for (const note of notes) {
+      const noteDuration = Array.from(note.children).find(
+        (el) => el.tagName === "duration"
+      );
+      const value = noteDuration ? Number(noteDuration.textContent.trim()) : NaN;
+      if (!Number.isFinite(value)) {
+        durationsKnown = false;
+        break;
+      }
+      totalDuration += value;
+    }
 
-    if (!duration) continue;
+    if (!durationsKnown) continue;
 
     // Preserve voice/staff information where present.
     const voice = Array.from(firstNote.children).find(
@@ -705,7 +719,7 @@ function fixAllRestMeasures(doc) {
     newNote.appendChild(rest);
 
     const newDuration = doc.createElement("duration");
-    newDuration.textContent = duration.textContent;
+    newDuration.textContent = String(totalDuration);
     newNote.appendChild(newDuration);
 
     if (voice) {
