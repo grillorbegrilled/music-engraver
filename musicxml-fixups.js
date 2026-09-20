@@ -784,9 +784,10 @@ function fixAllRestMeasures(doc) {
  *     segno/coda; any <words> for the textual ones) so authored
  *     content is never overwritten.
  *   - <measure><sound/></measure> (the bare shape Flat writes): a new
- *     <direction> is inserted at the measure's "header block" — after
- *     the leading attributes/print/sound/left-barline run, before the
- *     first real content.
+ *     <direction> is inserted — for glyphs, at the measure's "header
+ *     block" (after the leading attributes/print/sound/left-barline
+ *     run, before the first real content); for text, after the last
+ *     <note> (see placement below).
  *
  * Idempotent, which matters: loadScore() runs preprocessMusicXml()
  * again on text that's already been fixed. Because the bare <sound>
@@ -797,9 +798,12 @@ function fixAllRestMeasures(doc) {
  * <segno>/<coda> children are deliberately not counted: only
  * <direction-type> content is known to render.
  *
- * Known placement limitation: the new direction always lands at the
- * start of its measure, even for marks (Fine, D.S., D.C., To Coda)
- * that engraving convention puts at the measure's right edge.
+ * Placement follows engraving convention. Glyph marks (segno, coda)
+ * go at the start of the measure. Textual marks (D.S., D.C., To
+ * Coda, Fine) go at the end: the direction is inserted right after
+ * the measure's last <note>, so Verovio anchors it at the end of the
+ * measure, and its <words> get justify="right" so the text ends at
+ * the barline instead of running into the next measure.
  *
  * @param {Document} doc
  * @returns {number} number of visuals synthesized
@@ -817,7 +821,8 @@ function fixSoundOnlyNavigationMarks(doc) {
   // Where new directions go in each measure, computed once per
   // measure so several marks in the same measure keep document order
   // instead of each one being inserted in front of the previous one.
-  const headerInsertionPoints = new Map();
+  const startInsertionPoints = new Map();
+  const endInsertionPoints = new Map();
 
   let fixes = 0;
 
@@ -839,17 +844,20 @@ function fixSoundOnlyNavigationMarks(doc) {
     }
 
     // parent is <measure>: the bare shape.
-    if (!headerInsertionPoints.has(parent)) {
-      headerInsertionPoints.set(parent, firstNonHeaderChild(parent));
+    if (!startInsertionPoints.has(parent)) {
+      startInsertionPoints.set(parent, firstNonHeaderChild(parent));
+      endInsertionPoints.set(parent, endOfMeasureInsertionPoint(parent));
     }
-    const before = headerInsertionPoints.get(parent);
 
     for (const visual of visuals) {
       if (measureHasNavVisual(parent, visual)) continue;
 
       const direction = doc.createElement("direction");
       direction.setAttribute("placement", "above");
-      direction.appendChild(buildNavDirectionType(doc, visual));
+      direction.appendChild(buildNavDirectionType(doc, visual, visual.kind === "words"));
+
+      // Text marks belong at the measure's end, glyphs at its start.
+      const before = (visual.kind === "words" ? endInsertionPoints : startInsertionPoints).get(parent);
       parent.insertBefore(direction, before); // insertBefore(x, null) appends
       fixes++;
     }
@@ -907,11 +915,18 @@ function navVisualsFor(sound, suffix) {
   return visuals;
 }
 
-/** Builds <direction-type><segno/> | <coda/> | <words>text</words></direction-type>. */
-function buildNavDirectionType(doc, visual) {
+/**
+ * Builds <direction-type><segno/> | <coda/> | <words>text</words></direction-type>.
+ * `rightAligned` (bare-sound case only) sets justify="right" on the
+ * words, so text anchored at the end of a measure ends at the barline.
+ */
+function buildNavDirectionType(doc, visual, rightAligned = false) {
   const directionType = doc.createElement("direction-type");
   const content = doc.createElement(visual.kind);
-  if (visual.kind === "words") content.textContent = visual.text;
+  if (visual.kind === "words") {
+    content.textContent = visual.text;
+    if (rightAligned) content.setAttribute("justify", "right");
+  }
   directionType.appendChild(content);
   return directionType;
 }
@@ -961,6 +976,19 @@ function addNavVisualToDirection(doc, direction, visual) {
   const last = existing[existing.length - 1];
   const newType = buildNavDirectionType(doc, visual);
   direction.insertBefore(newType, last ? last.nextSibling : direction.firstChild);
+}
+
+/**
+ * Node to insert before so a new direction lands right after the
+ * measure's last <note> (null = append). Verovio anchors a direction
+ * placed after all the notes at the end of the measure. A measure
+ * with no notes has no separate end, so it falls back to the header
+ * insertion point.
+ */
+function endOfMeasureInsertionPoint(measure) {
+  const notes = Array.from(measure.children).filter((el) => el.tagName === "note");
+  if (notes.length === 0) return firstNonHeaderChild(measure);
+  return notes[notes.length - 1].nextElementSibling;
 }
 
 /**
