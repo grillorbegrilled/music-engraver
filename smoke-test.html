@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Verovio 6.3.0 smoke tests</title>
+    <style>
+      :root {
+        --bg: #fbfbfa;
+        --ink: #1f2328;
+        --muted: #656d76;
+        --line: #d8dee4;
+        --pass: #1a7f37;
+        --fail: #cf222e;
+        --info: #656d76;
+        --panel: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14171a;
+          --ink: #e6e8ea;
+          --muted: #9aa4ae;
+          --line: #2c333a;
+          --pass: #3fb950;
+          --fail: #ff7b72;
+          --info: #9aa4ae;
+          --panel: #1b1f23;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px 16px 64px;
+        background: var(--bg);
+        color: var(--ink);
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 860px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      h2 { font-size: 17px; margin: 0 0 4px; }
+      p.lede { margin: 0 0 20px; color: var(--muted); max-width: 70ch; }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      section > p { margin: 0 0 12px; color: var(--muted); max-width: 70ch; }
+      .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+      button, input[type="file"]::file-selector-button {
+        font: inherit;
+        padding: 6px 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        cursor: pointer;
+      }
+      button:hover { border-color: var(--muted); }
+      button:focus-visible, input:focus-visible, summary:focus-visible {
+        outline: 2px solid var(--ink);
+        outline-offset: 2px;
+      }
+      .row { display: flex; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+      .row:first-child { border-top: 0; }
+      .badge {
+        flex: none;
+        min-width: 52px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid currentColor;
+        align-self: flex-start;
+      }
+      .pass { color: var(--pass); }
+      .fail { color: var(--fail); }
+      .info { color: var(--info); }
+      .detail { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { font-weight: 600; }
+      .file-block { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+      .file-block:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+      .pages { display: grid; gap: 8px; margin-top: 8px; }
+      .pages figure { margin: 0; }
+      .pages img { width: 100%; height: auto; background: #fff; border: 1px solid var(--line); }
+      .pages figcaption { font-size: 12px; color: var(--muted); }
+      details { margin-top: 8px; }
+      summary { cursor: pointer; }
+      code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Verovio 6.3.0 smoke tests</h1>
+      <p class="lede">
+        Plan step 2. Checks 1 and 2 run on load. Check 3 needs your MusicXML files.
+        Serve this file from the same folder as <code>verovio-engine.js</code> and
+        <code>musicxml-fixups.js</code> (ES modules need http, not file://).
+        Example: <code>python -m http.server</code>.
+      </p>
+
+      <div class="toolbar">
+        <button id="rerun" type="button">Re-run checks 1 and 2</button>
+        <button id="copy" type="button">Copy all results as text</button>
+      </div>
+
+      <section id="s-version">
+        <h2>Loaded version</h2>
+        <div class="results"></div>
+      </section>
+
+      <section id="s-instance">
+        <h2>Check 1. Second toolkit instance</h2>
+        <p>
+          Loads two different scores into two <code>verovio.toolkit</code> instances.
+          Changes options and layout on one, confirms the other is untouched.
+        </p>
+        <div class="results"></div>
+      </section>
+
+      <section id="s-multirest">
+        <h2>Check 2. Multi-measure rest round-trip</h2>
+        <p>
+          Hand-written <code>&lt;multiple-rest&gt;3&lt;/multiple-rest&gt;</code> on a run of 3 rest
+          measures. Tested twice: plain <code>&lt;rest/&gt;</code> and
+          <code>&lt;rest measure="yes"/&gt;</code>.
+        </p>
+        <div class="results"></div>
+        <details>
+          <summary>Show rendered pages</summary>
+          <div class="pages" id="multirest-pages"></div>
+        </details>
+      </section>
+
+      <section id="s-nav">
+        <h2>Check 3. Segno / coda / D.S. gap</h2>
+        <p>
+          Pick <code>repeat_test.musicxml</code>, <code>repeat_test_1_.musicxml</code>, and
+          <code>Test4.musicxml</code> (any number of files). Each file goes through
+          <code>preprocessMusicXml()</code> and renders exactly like the app does today. The table
+          compares navigation <code>&lt;sound&gt;</code> attributes in the file against what shows
+          up in the SVG.
+        </p>
+        <input id="files" type="file" multiple accept=".xml,.musicxml" disabled />
+        <div class="results" id="nav-results"></div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { getToolkit, buildVerovioOptions } from "./verovio-engine.js";
+      import { preprocessMusicXml } from "./musicxml-fixups.js";
+
+      const SETTINGS = {
+        orientation: "landscape",
+        marginTopMm: 12,
+        marginBottomMm: 12,
+        marginLeftMm: 12,
+        marginRightMm: 12,
+        notationScalePercent: 100,
+      };
+
+      const report = [];
+      let mainTk = null;
+
+      // ---------- small DOM helpers ----------
+      function el(tag, attrs = {}, ...children) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) {
+          if (k === "class") node.className = v;
+          else node.setAttribute(k, v);
+        }
+        for (const c of children) {
+          node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        }
+        return node;
+      }
+
+      function results(sectionId) {
+        return document.querySelector(`#${sectionId} .results`);
+      }
+
+      function addRow(container, section, status, label, detail = "") {
+        const cls = status === "PASS" ? "pass" : status === "INFO" ? "info" : "fail";
+        container.append(
+          el(
+            "div",
+            { class: "row" },
+            el("span", { class: `badge ${cls}` }, status),
+            el("div", {}, el("strong", {}, label), detail ? el("div", { class: "detail" }, detail) : "")
+          )
+        );
+        report.push(`[${status}] ${section}: ${label}${detail ? " -- " + detail : ""}`);
+      }
+
+      // ---------- MusicXML builders ----------
+      const ATTR =
+        "<attributes><divisions>2</divisions><key><fifths>0</fifths></key>" +
+        "<time><beats>4</beats><beat-type>4</beat-type></time>" +
+        "<clef><sign>G</sign><line>2</line></clef></attributes>";
+
+      function score(title, body) {
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <work><work-title>${title}</work-title></work>
+  <part-list><score-part id="P1"><part-name>Test</part-name></score-part></part-list>
+  <part id="P1">${body}</part>
+</score-partwise>`;
+      }
+
+      function noteMeasure(n, steps, withAttrs) {
+        const notes = steps
+          .map(
+            (s) =>
+              `<note><pitch><step>${s}</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>`
+          )
+          .join("");
+        return `<measure number="${n}">${withAttrs ? ATTR : ""}${notes}</measure>`;
+      }
+
+      function restMeasure(n, { multi = 0, measureYes = false } = {}) {
+        const ms = multi
+          ? `<attributes><measure-style><multiple-rest>${multi}</multiple-rest></measure-style></attributes>`
+          : "";
+        const rest = measureYes ? `<rest measure="yes"/>` : `<rest/>`;
+        return `<measure number="${n}">${ms}<note>${rest}<duration>8</duration></note></measure>`;
+      }
+
+      // ---------- SVG helpers ----------
+      function parseSvg(str) {
+        return new DOMParser().parseFromString(str, "image/svg+xml");
+      }
+      function svgText(doc) {
+        return [...doc.querySelectorAll("text")]
+          .map((t) => t.textContent)
+          .join("\n")
+          .replace(/[ \t]+/g, " ")
+          .trim();
+      }
+      function svgImgUrl(svgStr) {
+        return URL.createObjectURL(new Blob([svgStr], { type: "image/svg+xml" }));
+      }
+      function showPages(container, items) {
+        // items: [{ svg, caption }]
+        container.replaceChildren();
+        for (const it of items) {
+          container.append(
+            el(
+              "figure",
+              {},
+              el("img", { src: svgImgUrl(it.svg), alt: it.caption }),
+              el("figcaption", {}, it.caption)
+            )
+          );
+        }
+      }
+
+      // ---------- Version ----------
+      function checkVersion(tk) {
+        const box = results("s-version");
+        box.replaceChildren();
+        let v = "unknown";
+        try {
+          v = tk.getVersion();
+        } catch (e) {
+          /* leave unknown */
+        }
+        addRow(
+          box,
+          "Version",
+          /^6\.3/.test(v) ? "PASS" : "FAIL",
+          `Toolkit reports: ${v}`,
+          "Expected 6.3.x. If this is not 6.3, the CDN pin did not take effect."
+        );
+      }
+
+      // ---------- Check 1: second toolkit instance ----------
+      function checkInstances(tkA) {
+        const box = results("s-instance");
+        box.replaceChildren();
+        const S = "Second toolkit instance";
+        let tkB = null;
+        try {
+          if (!window.verovio || typeof window.verovio.toolkit !== "function") {
+            addRow(box, S, "FAIL", "window.verovio.toolkit is not available");
+            return;
+          }
+          const opts = buildVerovioOptions(SETTINGS);
+          const scoreA = score(
+            "Alpha Score",
+            noteMeasure(1, ["C", "D", "E", "F"], true) + noteMeasure(2, ["G", "A", "B", "C"], false)
+          );
+          const scoreB = score(
+            "Bravo Score",
+            noteMeasure(1, ["E", "E", "E", "E"], true) +
+              noteMeasure(2, ["F", "F", "F", "F"], false) +
+              noteMeasure(3, ["G", "G", "G", "G"], false) +
+              noteMeasure(4, ["A", "A", "A", "A"], false) +
+              noteMeasure(5, ["B", "B", "B", "B"], false) +
+              noteMeasure(6, ["C", "C", "C", "C"], false) +
+              noteMeasure(7, ["D", "D", "D", "D"], false) +
+              noteMeasure(8, ["E", "E", "E", "E"], false)
+          );
+
+          tkA.setOptions(opts);
+          const okA = tkA.loadData(scoreA);
+          const a1 = tkA.renderToSVG(1);
+
+          tkB = new window.verovio.toolkit();
+          tkB.setOptions({ ...opts, scale: 50 });
+          const okB = tkB.loadData(scoreB);
+          tkB.redoLayout();
+          const b1 = tkB.renderToSVG(1);
+
+          addRow(
+            box,
+            S,
+            okA && okB ? "PASS" : "FAIL",
+            "Both instances loaded their own score",
+            `A ok=${okA}, pages=${tkA.getPageCount()}; B ok=${okB}, pages=${tkB.getPageCount()}`
+          );
+
+          const textA = svgText(parseSvg(a1));
+          const textB = svgText(parseSvg(b1));
+          const titlesOk =
+            textA.includes("Alpha Score") &&
+            !textA.includes("Bravo Score") &&
+            textB.includes("Bravo Score") &&
+            !textB.includes("Alpha Score");
+          addRow(
+            box,
+            S,
+            titlesOk ? "PASS" : "FAIL",
+            "Each instance renders only its own score",
+            titlesOk ? "A shows Alpha, B shows Bravo." : `A text: "${textA.slice(0, 60)}" / B text: "${textB.slice(0, 60)}"`
+          );
+
+          const a2 = tkA.renderToSVG(1);
+          addRow(
+            box,
+            S,
+            a1 === a2 ? "PASS" : "FAIL",
+            "A output unchanged after B loaded",
+            a1 === a2 ? "Identical SVG." : "A's SVG changed when B was loaded. Instances share state."
+          );
+
+          tkA.setOptions({ ...opts, scale: 150 });
+          tkA.redoLayout();
+          const b2 = tkB.renderToSVG(1);
+          addRow(
+            box,
+            S,
+            b1 === b2 ? "PASS" : "FAIL",
+            "B unaffected by A option change and relayout",
+            b1 === b2 ? "Identical SVG after A went to scale 150." : "B's SVG changed. Options leak between instances."
+          );
+          tkA.setOptions(opts);
+          tkA.redoLayout();
+
+          if (typeof tkB.destroy === "function") {
+            tkB.destroy();
+            tkB = null;
+            const a3 = tkA.renderToSVG(1);
+            const alive = a3 && svgText(parseSvg(a3)).includes("Alpha Score");
+            addRow(
+              box,
+              S,
+              alive ? "PASS" : "FAIL",
+              "A still renders after B.destroy()",
+              alive ? "Dispose of a batch instance is safe for the main preview." : "A broke after B was destroyed."
+            );
+          } else {
+            addRow(box, S, "INFO", "toolkit.destroy() not found", "Part renderer cannot dispose its instance. Check the 6.3.0 API.");
+          }
+        } catch (err) {
+          addRow(box, S, "FAIL", "Threw an error", String(err && err.message ? err.message : err));
+          try {
+            if (tkB && typeof tkB.destroy === "function") tkB.destroy();
+          } catch (e) {
+            /* ignore */
+          }
+        }
+      }
+
+      // ---------- Check 2: multi-measure rest ----------
+      function checkMultiRest(tk) {
+        const box = results("s-multirest");
+        box.replaceChildren();
+        const S = "Multi-measure rest";
+        const pagesBox = document.getElementById("multirest-pages");
+        const shown = [];
+        const variants = [
+          { name: "plain <rest/>", measureYes: false },
+          { name: '<rest measure="yes"/>', measureYes: true },
+        ];
+        for (const v of variants) {
+          try {
+            const xml = score(
+              "Multi Rest Test",
+              noteMeasure(1, ["C", "D", "E", "F"], true) +
+                restMeasure(2, { multi: 3, measureYes: v.measureYes }) +
+                restMeasure(3, { measureYes: v.measureYes }) +
+                restMeasure(4, { measureYes: v.measureYes }) +
+                noteMeasure(5, ["G", "A", "B", "C"], false)
+            );
+            tk.setOptions(buildVerovioOptions(SETTINGS));
+            const ok = tk.loadData(xml);
+            if (!ok) {
+              addRow(box, S, "FAIL", `${v.name}: Verovio could not load the test score`);
+              continue;
+            }
+            const pages = tk.getPageCount();
+            const svg = tk.renderToSVG(1);
+            const doc = parseSvg(svg);
+            const multi = doc.querySelectorAll('g[class~="multiRest"]').length;
+            const measures = doc.querySelectorAll('g[class~="measure"]').length;
+            addRow(
+              box,
+              S,
+              multi > 0 ? "PASS" : "FAIL",
+              `${v.name}: ${multi > 0 ? "rendered as multiRest" : "no multiRest element in SVG"}`,
+              `multiRest elements: ${multi}. Measures drawn on page 1: ${measures} (5 written; 3 if the run collapsed). Pages: ${pages}.`
+            );
+            shown.push({ svg, caption: `Variant: ${v.name}` });
+          } catch (err) {
+            addRow(box, S, "FAIL", `${v.name}: threw an error`, String(err && err.message ? err.message : err));
+          }
+        }
+        showPages(pagesBox, shown);
+      }
+
+      // ---------- Check 3: navigation mark gap ----------
+      const MARKS = [
+        { key: "segno", attr: "segno", glyph: "E047" },
+        { key: "coda", attr: "coda", glyph: "E048" },
+        { key: "D.S.", attr: "dalsegno", re: /D\.\s?S\./gi },
+        { key: "D.C.", attr: "dacapo", re: /D\.\s?C\./gi },
+        { key: "To Coda", attr: "tocoda", re: /to\s+coda/gi },
+        { key: "Fine", attr: "fine", re: /\bfine\b/gi },
+      ];
+
+      function countMatches(str, re) {
+        return (str.match(re) || []).length;
+      }
+
+      function verdict(sounds, xmlVisual, rendered) {
+        if (sounds === 0 && xmlVisual === 0 && rendered === 0) return null;
+        if (rendered > 0 && xmlVisual === 0)
+          return { label: "NATIVE", cls: "pass", note: "Drawn with no visual in the XML. Verovio handles it." };
+        if (rendered > 0) return { label: "OK", cls: "pass", note: "XML has a visual and it is drawn." };
+        if (xmlVisual > 0)
+          return { label: "CHECK", cls: "info", note: "Visual exists in XML but nothing drawn. Look at the pages." };
+        return { label: "GAP", cls: "fail", note: "Sound attribute only, nothing drawn. Fixer needed." };
+      }
+
+      async function checkNav(tk, file) {
+        const S = `Navigation marks (${file.name})`;
+        const block = el("div", { class: "file-block" }, el("h2", {}, file.name));
+        results("s-nav").append(block);
+        try {
+          const raw = await file.text();
+          const rawDoc = new DOMParser().parseFromString(raw, "application/xml");
+          if (rawDoc.querySelector("parsererror")) {
+            block.append(el("div", { class: "detail" }, "Not well-formed XML."));
+            report.push(`[FAIL] ${S}: not well-formed XML`);
+            return;
+          }
+          const sounds = [...rawDoc.getElementsByTagName("sound")];
+          const words = [...rawDoc.getElementsByTagName("words")].map((w) => w.textContent);
+          const wordsJoined = words.join("\n");
+
+          tk.setOptions(buildVerovioOptions(SETTINGS));
+          const ok = tk.loadData(preprocessMusicXml(raw));
+          if (!ok) {
+            block.append(el("div", { class: "detail" }, "Verovio could not load this file."));
+            report.push(`[FAIL] ${S}: Verovio could not load the file`);
+            return;
+          }
+          const pageCount = tk.getPageCount();
+          const svgs = [];
+          const perPage = [];
+          for (let p = 1; p <= pageCount; p++) {
+            const svg = tk.renderToSVG(p);
+            svgs.push(svg);
+            const doc = parseSvg(svg);
+            const uses = [...doc.querySelectorAll("use")].map(
+              (u) => u.getAttribute("xlink:href") || u.getAttribute("href") || ""
+            );
+            perPage.push({
+              uses,
+              text: svgText(doc),
+            });
+          }
+
+          const table = el(
+            "table",
+            {},
+            el(
+              "thead",
+              {},
+              el(
+                "tr",
+                {},
+                el("th", {}, "Mark"),
+                el("th", {}, "In <sound>"),
+                el("th", {}, "Visual in XML"),
+                el("th", {}, "Drawn in SVG"),
+                el("th", {}, "Result")
+              )
+            )
+          );
+          const tbody = el("tbody");
+          table.append(tbody);
+          const hitPages = new Set();
+          let anyGap = false;
+          let anyNative = false;
+          let anyRow = false;
+
+          for (const m of MARKS) {
+            const soundCount = sounds.filter((s) => s.hasAttribute(m.attr)).length;
+            let xmlVisual;
+            let rendered = 0;
+            if (m.glyph) {
+              xmlVisual = rawDoc.querySelectorAll(`direction-type > ${m.key}`).length;
+              perPage.forEach((pg, i) => {
+                const n = pg.uses.filter((h) => h.startsWith(`#${m.glyph}`)).length;
+                if (n) hitPages.add(i + 1);
+                rendered += n;
+              });
+            } else {
+              xmlVisual = countMatches(wordsJoined, m.re);
+              perPage.forEach((pg, i) => {
+                const n = countMatches(pg.text, m.re);
+                if (n) hitPages.add(i + 1);
+                rendered += n;
+              });
+            }
+            const v = verdict(soundCount, xmlVisual, rendered);
+            if (!v) continue;
+            anyRow = true;
+            if (v.label === "GAP") anyGap = true;
+            if (v.label === "NATIVE") anyNative = true;
+            tbody.append(
+              el(
+                "tr",
+                {},
+                el("td", {}, m.key),
+                el("td", {}, soundCount),
+                el("td", {}, xmlVisual),
+                el("td", {}, rendered),
+                el("td", {}, el("span", { class: `badge ${v.cls}` }, v.label), " ", v.note)
+              )
+            );
+            report.push(
+              `[${v.label}] ${S}: ${m.key} -- sound=${soundCount}, xmlVisual=${xmlVisual}, drawn=${rendered}`
+            );
+          }
+
+          if (!anyRow) {
+            block.append(el("div", { class: "detail" }, "No navigation marks found in this file."));
+            report.push(`[INFO] ${S}: no navigation marks found`);
+            return;
+          }
+          block.append(table);
+
+          const summary = anyGap
+            ? "At least one mark is sound-only and not drawn. §2.1 fixer is still needed."
+            : anyNative
+            ? "Verovio draws marks that have no XML visual. §2.1 can shrink."
+            : "All marks here already have XML visuals.";
+          block.append(el("div", { class: "detail" }, `${pageCount} pages rendered. ${summary}`));
+          report.push(`[INFO] ${S}: ${summary}`);
+
+          const previewPages = hitPages.size ? [...hitPages].sort((a, b) => a - b).slice(0, 6) : [1];
+          const details = el(
+            "details",
+            {},
+            el(
+              "summary",
+              {},
+              hitPages.size
+                ? `Show pages with marks (${previewPages.join(", ")})`
+                : "Show page 1 (no marks drawn anywhere)"
+            )
+          );
+          const pagesDiv = el("div", { class: "pages" });
+          details.append(pagesDiv);
+          details.addEventListener(
+            "toggle",
+            () => {
+              if (details.open && !pagesDiv.childElementCount) {
+                showPages(
+                  pagesDiv,
+                  previewPages.map((p) => ({ svg: svgs[p - 1], caption: `${file.name}, page ${p}` }))
+                );
+              }
+            },
+            { once: false }
+          );
+          block.append(details);
+        } catch (err) {
+          block.append(el("div", { class: "detail" }, `Error: ${err && err.message ? err.message : err}`));
+          report.push(`[FAIL] ${S}: ${err && err.message ? err.message : err}`);
+        }
+      }
+
+      // ---------- wiring ----------
+      async function runAuto() {
+        report.length = 0;
+        for (const id of ["s-version", "s-instance", "s-multirest"]) results(id).replaceChildren();
+        try {
+          mainTk = mainTk || (await getToolkit());
+        } catch (err) {
+          addRow(results("s-version"), "Version", "FAIL", "Could not start Verovio", String(err && err.message ? err.message : err));
+          return;
+        }
+        checkVersion(mainTk);
+        checkMultiRest(mainTk);
+        checkInstances(mainTk);
+        document.getElementById("files").disabled = false;
+      }
+
+      document.getElementById("rerun").addEventListener("click", runAuto);
+
+      document.getElementById("files").addEventListener("change", async (e) => {
+        const files = [...e.target.files];
+        results("s-nav").replaceChildren();
+        for (const f of files) await checkNav(mainTk, f);
+      });
+
+      document.getElementById("copy").addEventListener("click", async (e) => {
+        const text = report.join("\n");
+        try {
+          await navigator.clipboard.writeText(text);
+          e.target.textContent = "Copied";
+        } catch (err) {
+          e.target.textContent = "Copy failed (select text manually)";
+          console.log(text);
+        }
+        setTimeout(() => (e.target.textContent = "Copy all results as text"), 1800);
+      });
+
+      runAuto();
+    </script>
+  </body>
+</html>
