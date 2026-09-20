@@ -802,8 +802,9 @@ function fixAllRestMeasures(doc) {
  * go at the start of the measure. Textual marks (D.S., D.C., To
  * Coda, Fine) go at the end: the direction is inserted right after
  * the measure's last <note>, so Verovio anchors it at the end of the
- * measure, and its <words> get justify="right" so the text ends at
- * the barline instead of running into the next measure.
+ * measure, and its <words> get justify="right" and halign="right" so
+ * the text ends at the barline instead of running into the next
+ * measure.
  *
  * @param {Document} doc
  * @returns {number} number of visuals synthesized
@@ -917,15 +918,22 @@ function navVisualsFor(sound, suffix) {
 
 /**
  * Builds <direction-type><segno/> | <coda/> | <words>text</words></direction-type>.
- * `rightAligned` (bare-sound case only) sets justify="right" on the
- * words, so text anchored at the end of a measure ends at the barline.
+ * `rightAligned` (bare-sound case only) sets justify="right" and
+ * halign="right" on the words, so text anchored at the end of a
+ * measure ends at the barline.
  */
 function buildNavDirectionType(doc, visual, rightAligned = false) {
   const directionType = doc.createElement("direction-type");
   const content = doc.createElement(visual.kind);
   if (visual.kind === "words") {
     content.textContent = visual.text;
-    if (rightAligned) content.setAttribute("justify", "right");
+    if (rightAligned) {
+      // Both are standard text-formatting attributes on <words>.
+      // Verovio honors at most one of them; set both rather than
+      // guess which.
+      content.setAttribute("justify", "right");
+      content.setAttribute("halign", "right");
+    }
   }
   directionType.appendChild(content);
   return directionType;
