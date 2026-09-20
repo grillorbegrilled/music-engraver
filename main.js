@@ -1,5 +1,5 @@
 // main.js
-import { loadScore, updateSettings, renderPage, PAGE_SIZE_MM, getRepeatDebugMei } from "./verovio-engine.js";
+import { loadScore, updateSettings, renderPage, PAGE_SIZE_MM } from "./verovio-engine.js";
 import { extractScoreMetadata } from "./musicxml-fixups.js";
 import { stampScoreMetadata, getPageGeometry } from "./score-overlay.js";
 
@@ -122,8 +122,6 @@ async function handleFile(file) {
     const text = await readFileAsText(file);
     currentMetadata = extractScoreMetadata(text);
     totalPages = await loadScore(text, currentSettings());
-    // TEMP DEBUG: show MEI repeat measures in the error box (remove later).
-    showError(getRepeatDebugMei(), "TEMP DEBUG — MEI measures with repeats:");
     renderAllPages(totalPages);
     scoreIsLoaded = true;
     loadedFileName = file.name.replace(/\.[^/.]+$/, "");

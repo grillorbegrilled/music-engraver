@@ -7,15 +7,7 @@
 // sure Verovio's importer doesn't misread input that's valid but easy
 // to trip on.
 //
-// Entry points:
-//   preprocessMusicXml(xmlText) -> xmlText (string in, string out)
-//   preprocessMusicXmlDetailed(xmlText) -> { xml, repeatBlocks }
-//     Same as above, plus a list of the 2-/4-measure repeat blocks that
-//     fixNumeralRepeatDirections created. Verovio's MusicXML importer
-//     drops the block length (it draws N separate one-bar signs), so
-//     mei-repeats.js uses this list to turn 2-bar blocks into <mRpt2/>.
-//     Each block: { staffIndex (0-based, across all parts), measureIndex
-//     (0-based within the part), count (2 or 4) }.
+// Entry point: preprocessMusicXml(xmlText) -> xmlText (string in, string out)
 
 /**
  * Ordered list of fixers. Each one takes a parsed XML Document, mutates
@@ -23,11 +15,7 @@
  * new fixers here as new Verovio import quirks turn up — that's the
  * whole extension point for this file.
  */
-// Order matters for the first two: fixNumeralRepeatDirections can leave
-// a <measure-repeat> open through the end of a part (legal by spec), so
-// it must run BEFORE fixUnterminatedMeasureRepeats, which then patches
-// the resulting cross-part leak.
-const FIXERS = [fixNumeralRepeatDirections, fixUnterminatedMeasureRepeats,
+const FIXERS = [fixUnterminatedMeasureRepeats, fixNumeralRepeatDirections,
                fixZBuzzRollDirections, fixBassDrumNoteheads, fixCymbalNoteheads,
                fixAllRestMeasures];
 
@@ -42,23 +30,11 @@ const FIXERS = [fixNumeralRepeatDirections, fixUnterminatedMeasureRepeats,
  * @returns {string}
  */
 export function preprocessMusicXml(xmlText) {
-  return preprocessMusicXmlDetailed(xmlText).xml;
-}
-
-/**
- * Same as preprocessMusicXml, but also returns the multi-measure repeat
- * blocks the fixers created (see the header comment).
- *
- * @param {string} xmlText
- * @returns {{xml: string, repeatBlocks: Array<{staffIndex: number, measureIndex: number, count: number}>}}
- */
-export function preprocessMusicXmlDetailed(xmlText) {
-  const ctx = { repeatBlocks: [] };
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlText, "application/xml");
 
   if (doc.getElementsByTagName("parsererror").length > 0) {
-    return { xml: xmlText, repeatBlocks: [] };
+    return xmlText;
   }
 
   let totalFixes = 0;
@@ -71,7 +47,7 @@ export function preprocessMusicXmlDetailed(xmlText) {
     // instead of just missing the one broken fix.
     let count = 0;
     try {
-      count = fixer(doc, ctx) || 0;
+      count = fixer(doc) || 0;
     } catch (err) {
       console.error(`[musicxml-fixups] ${fixer.name} threw and was skipped:`, err);
       continue;
@@ -82,9 +58,9 @@ export function preprocessMusicXmlDetailed(xmlText) {
     }
   }
 
-  if (totalFixes === 0) return { xml: xmlText, repeatBlocks: ctx.repeatBlocks };
+  if (totalFixes === 0) return xmlText;
 
-  return { xml: new XMLSerializer().serializeToString(doc), repeatBlocks: ctx.repeatBlocks };
+  return new XMLSerializer().serializeToString(doc);
 }
 
 // --- Fixers ----------------------------------------------------------
@@ -234,14 +210,8 @@ function insertMeasureRepeatStop(doc, measure, key) {
  *   - delete the numeral <direction>
  *   - open the block with <measure-repeat type="start" slashes="N">N</measure-repeat>
  *     on the first measure of the block
- *   - close it with an empty <measure-repeat type="stop"/> on the
- *     measure AFTER the block. Per the MusicXML spec, "stop" marks the
- *     first measure where the repeat is no longer displayed, so putting
- *     it on the block's own last measure would cut the repeat short.
- *     If the block runs to the end of the part there is no such
- *     measure, and the stop is omitted (legal by spec);
- *     fixUnterminatedMeasureRepeats, which runs after this fixer,
- *     handles the resulting cross-part leak in Verovio.
+ *   - close it with an empty <measure-repeat type="stop"/> on the last
+ *     measure of the block
  * slashes is set to N so the engraved symbol draws N diagonal slashes
  * — unambiguous at a glance, rather than defaulting to a single slash
  * that a 2- or 4-bar repeat could otherwise be misread as.
@@ -255,18 +225,12 @@ function insertMeasureRepeatStop(doc, measure, key) {
  * truncated marking — the direction is left in place rather than
  * guessed at.
  *
- * Each converted block is also recorded in ctx.repeatBlocks
- * ({ staffIndex, measureIndex, count }) so mei-repeats.js can turn
- * Verovio's per-measure <mRpt/> pairs into a single <mRpt2/>.
- *
  * @param {Document} doc
- * @param {{repeatBlocks: Array}} [ctx]
  * @returns {number} number of numeral directions converted
  */
-function fixNumeralRepeatDirections(doc, ctx) {
+function fixNumeralRepeatDirections(doc) {
   let fixes = 0;
   const parts = Array.from(doc.getElementsByTagName("part"));
-  const staffOffsets = partStaffOffsets(doc);
 
   for (const part of parts) {
     const measures = Array.from(part.getElementsByTagName("measure"));
@@ -287,49 +251,13 @@ function fixNumeralRepeatDirections(doc, ctx) {
       match.parentNode.removeChild(match);
 
       addMeasureRepeatMarker(doc, measures[i], "start", count, staffNumber, String(count));
-
-      if (ctx && ctx.repeatBlocks) {
-        ctx.repeatBlocks.push({
-          staffIndex: staffOffsets.get(part) + (Number(staffNumber) || 1) - 1,
-          measureIndex: i,
-          count,
-        });
-      }
-
-      // Stop goes on the first measure AFTER the block. If that measure
-      // holds the next numeral block's direction, its own start is
-      // appended after this stop (loop runs in document order), so
-      // stop-then-start ordering is preserved within the measure.
-      const stopIndex = i + count;
-      if (stopIndex < measures.length) {
-        addMeasureRepeatMarker(doc, measures[stopIndex], "stop", count, staffNumber, "");
-      }
+      addMeasureRepeatMarker(doc, measures[i + count - 1], "stop", count, staffNumber, "");
 
       fixes++;
     }
   }
 
   return fixes;
-}
-
-/**
- * Maps each <part> to the 0-based index of its first staff counting
- * every staff of every earlier part (a piano part with <staves>2</staves>
- * takes two slots). Verovio numbers MEI staves the same way, so this
- * lines up with the staves in the rendered SVG.
- */
-function partStaffOffsets(doc) {
-  const offsets = new Map();
-  let next = 0;
-  for (const part of Array.from(doc.getElementsByTagName("part"))) {
-    offsets.set(part, next);
-    let staves = 1;
-    for (const el of Array.from(part.getElementsByTagName("staves"))) {
-      staves = Math.max(staves, parseInt(el.textContent, 10) || 1);
-    }
-    next += staves;
-  }
-  return offsets;
 }
 
 /**
