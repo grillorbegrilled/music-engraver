@@ -133,6 +133,9 @@ export function buildVerovioOptions(settings) {
     // just makes sure Verovio doesn't also try (and, on this pinned
     // build, sometimes fail) to draw its own footer underneath ours.
     footer: "none",
+    multiRestStyle: "block",
+// optional, thicker bar (default 2.0, range 0.5–6.0):
+// multiRestThickness: 3,
   };
 }
 
