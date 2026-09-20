@@ -8,15 +8,14 @@
 // Verovio, no app state, defensive no-ops on anything unexpected rather
 // than guessing.
 //
-// SCOPE OF THIS VERSION (plan §9 steps 5-6): splitting + header
-// retention, and §3.2 global-direction propagation (rehearsal letters,
-// tempo, segno/coda/D.S./D.C./Fine that live on one part only). One
-// later step still adds work inside this module:
-//   - §3.3 multi-measure-rest run collapsing
-// It operates on the per-part documents built here, which is why the
-// split is written as "build one Document per part" and only serialized
-// at the very end — propagation runs on each per-part Document right
-// after it's built, and collapsing will slot in right after that.
+// SCOPE OF THIS VERSION (plan §9 steps 5-7): splitting + header
+// retention, §3.2 global-direction propagation (rehearsal letters,
+// tempo, segno/coda/D.S./D.C./Fine that live on one part only), and
+// §3.3 multi-measure-rest run collapsing. Everything works on the
+// per-part Documents built here, which is why the split is written as
+// "build one Document per part" and only serialized at the very end:
+// propagation runs on each per-part Document right after it's built,
+// then collapsing runs on the propagated result.
 //
 // Entry point: extractParts(fixedXmlText) -> [{ id, name, xmlText }, ...]
 
@@ -60,6 +59,12 @@ import {
  * see propagateGlobalMarks(). This is why the output is not a pure
  * "subset" of the input: a part can gain directions that only its
  * siblings carried in the source.
+ *
+ * Runs of rest-only measures are then collapsed into multi-measure
+ * rests (plan §3.3) — see collapseRestRuns(). Collapsing happens after
+ * propagation, so it only ever has to deal with one case: a mark
+ * sitting on an interior measure of a run, whether that mark was
+ * original to the part or just propagated in.
  *
  * Every <score-part> that has a matching <part> is extracted — no
  * exclusions. Skipped (with a console.warn, never a throw):
@@ -139,10 +144,12 @@ export function extractParts(fixedXmlText) {
   const serializer = new XMLSerializer();
   const results = [];
   let propagated = 0;
+  let collapsedRuns = 0;
 
   for (const { id, scorePart, part, position } of entries) {
     const partDoc = buildSinglePartDocument(doc, scorePart, part);
     propagated += propagateGlobalMarks(partDoc, id, marksByIndex);
+    collapsedRuns += collapseRestRuns(partDoc); // must follow propagation (§3.3)
     results.push({
       id,
       name: partDisplayName(scorePart, position),
@@ -152,6 +159,10 @@ export function extractParts(fixedXmlText) {
 
   if (propagated > 0) {
     console.info(`[part-extraction] propagated ${propagated} global mark(s) across ${results.length} part(s)`);
+  }
+
+  if (collapsedRuns > 0) {
+    console.info(`[part-extraction] collapsed ${collapsedRuns} rest run(s) into multi-measure rests`);
   }
 
   return results;
@@ -497,4 +508,259 @@ function sanitizeSound(sound) {
   }
   while (sound.firstChild) sound.removeChild(sound.firstChild);
   return sound;
+}
+
+// --- §3.3 Multi-measure-rest run collapsing --------------------------
+//
+// A part that sits out eight bars shouldn't spend eight bars of paper
+// on it. MusicXML's encoding is tiny (plan §1): put
+// <measure-style><multiple-rest>N</multiple-rest></measure-style> in the
+// FIRST measure of the run and leave every measure's own rest note in
+// place. Verovio does the collapsing; this module only decides where
+// runs are and makes sure nothing meaningful is stranded inside one.
+
+/** Runs shorter than this gain nothing from a multi-rest marking saying "1". */
+const MIN_REST_RUN = 2;
+
+/**
+ * Bar styles that are structural section boundaries rather than
+ * ordinary bars: double (light-light), final (light-heavy — a mid-piece
+ * one is a Fine or the bar before a D.C./D.S., see plan §1), and the
+ * two heavy-first forms. A multi-rest must never span one.
+ */
+const STRUCTURAL_BAR_STYLES = new Set(["light-light", "light-heavy", "heavy-light", "heavy-heavy"]);
+
+/**
+ * <attributes> children that change what a bar IS: meter, key, clef,
+ * transposition, staff count. A measure carrying one can't fold into
+ * the run before it — the bars would no longer be the same length /
+ * in the same key, and the change itself would vanish. (Not in the
+ * plan's boundary list; added because silently dropping a time
+ * signature is worse than not collapsing. <divisions> is deliberately
+ * absent: it changes how durations are written, not the music.)
+ */
+const NOTATION_STATE_TAGS = new Set(["time", "key", "clef", "transpose", "staves"]);
+
+/**
+ * Collapses every run of 2+ consecutive rest-only measures in the
+ * part into a multi-measure rest, and relocates any marking that sat
+ * on the interior of a run. Mutates `partDoc`; returns the number of
+ * runs collapsed.
+ *
+ * This module owns multi-rest layout: any <multiple-rest> the source
+ * already carried is recomputed rather than trusted (the source's run
+ * may span a boundary this module refuses to cross, or stop short of
+ * one it would happily span). That also makes the pass idempotent —
+ * re-collapsing an already-collapsed part changes nothing.
+ *
+ * @param {Document} partDoc — single-part document from buildSinglePartDocument
+ * @returns {number}
+ */
+function collapseRestRuns(partDoc) {
+  const partEl = childElements(partDoc.documentElement, "part")[0];
+  if (!partEl) return 0;
+
+  const measures = childElements(partEl, "measure");
+  const runs = findRestRuns(measures);
+
+  const inRun = new Set(runs.flat());
+  for (const measure of measures) {
+    if (!inRun.has(measure)) stripMultipleRest(measure); // stale marker from the source
+  }
+  for (const run of runs) applyRestRun(partDoc, run);
+
+  return runs.length;
+}
+
+/**
+ * Groups measures into runs of consecutive collapsible rest measures
+ * (length >= MIN_REST_RUN only), split at hard boundaries and at
+ * measures that change meter/key/clef.
+ *
+ * @param {Element[]} measures
+ * @returns {Element[][]}
+ */
+function findRestRuns(measures) {
+  const runs = [];
+  let run = [];
+  const flush = () => {
+    if (run.length >= MIN_REST_RUN) runs.push(run);
+    run = [];
+  };
+
+  for (const measure of measures) {
+    if (!isCollapsibleRestMeasure(measure)) {
+      flush();
+      continue;
+    }
+    if (run.length > 0 && (isHardBoundary(run[run.length - 1], measure) || changesNotationState(measure))) {
+      flush();
+    }
+    run.push(measure);
+  }
+  flush();
+
+  return runs;
+}
+
+/**
+ * True if every <note> in the measure is a rest. Mirrors
+ * fixAllRestMeasures()'s check, but deliberately NOT its single-voice
+ * restriction: that fixer had to represent the measure as one note;
+ * collapsing leaves note content alone, so two voices resting
+ * together still fold fine. A measure with NO notes is not rest-only
+ * (same conservative call as that fixer): it breaks a run.
+ *
+ * Also refuses, so nothing real is dropped from the drawn page:
+ *   - <harmony> / <figured-bass> (chord symbols over rests are content)
+ *   - implicit="yes" measures (pickups / split bars aren't full bars)
+ * Cue notes and anything else pitched already fail the every-rest test.
+ */
+function isCollapsibleRestMeasure(measure) {
+  const notes = childElements(measure, "note");
+  if (notes.length === 0) return false;
+  if (!notes.every((note) => childElements(note, "rest").length > 0)) return false;
+  if (measure.getAttribute("implicit") === "yes") return false;
+  if (childElements(measure, "harmony").length > 0) return false;
+  if (childElements(measure, "figured-bass").length > 0) return false;
+  return true;
+}
+
+/** True if `measure` has an <attributes> child carrying a NOTATION_STATE_TAGS element. */
+function changesNotationState(measure) {
+  return childElements(measure, "attributes").some((attrs) =>
+    Array.from(attrs.children).some((el) => NOTATION_STATE_TAGS.has(el.tagName))
+  );
+}
+
+/**
+ * True if the barline of `measure` at `location` ("left" | "right";
+ * an absent location attribute means right, per the spec) is a hard
+ * boundary: a structural bar style, a repeat, a volta <ending>, or a
+ * barline-attached <segno>/<coda>. The last two aren't in the plan's
+ * list; a volta bracket or sign stranded inside a collapsed run would
+ * simply not be drawn.
+ */
+function hasHardBarline(measure, location) {
+  return childElements(measure, "barline")
+    .filter((b) => (b.getAttribute("location") || "right") === location)
+    .some((barline) => {
+      const style = childElements(barline, "bar-style")[0];
+      const styleText = style ? style.textContent.trim() : "";
+      return (
+        STRUCTURAL_BAR_STYLES.has(styleText) ||
+        childElements(barline, "repeat").length > 0 ||
+        childElements(barline, "ending").length > 0 ||
+        childElements(barline, "segno").length > 0 ||
+        childElements(barline, "coda").length > 0
+      );
+    });
+}
+
+/** The gap between two adjacent measures is hard if either barline touching it is. */
+function isHardBoundary(measureBefore, measureAfter) {
+  return hasHardBarline(measureBefore, "right") || hasHardBarline(measureAfter, "left");
+}
+
+/**
+ * Applies one collapse: multi-rest marker on the first measure, and
+ * every <direction>/<sound> on an interior measure moved to whichever
+ * edge of the run it's nearer.
+ *
+ * MusicXML can't say "this happens 3 bars into an 8-bar rest", so an
+ * interior mark has nowhere to render once the bars visually merge:
+ *   - run-relative index < N/2  -> start of `first`, immediately
+ *     before its first <note> (so after the measure's own leading
+ *     attributes/marks: chronological order is kept — what `first`
+ *     already said comes before what moved in from later bars)
+ *   - index >= N/2              -> end of `last`, immediately after its
+ *     last <note>, ahead of any marks `last` already has after it
+ *     (same chronological logic). Not "before the trailing barline":
+ *     fixAllRestMeasures appends the collapsed rest AFTER a right
+ *     <barline>, so "after the note" is the only end that's reliable
+ *     (Verovio anchors on time position, not XML order relative to
+ *     the barline).
+ * Marks already on `first` or `last` stay put. Moves keep document
+ * order, because each batch is inserted before one fixed reference node.
+ */
+function applyRestRun(partDoc, run) {
+  const n = run.length;
+  const first = run[0];
+  const last = run[n - 1];
+
+  setMultipleRest(partDoc, first, n);
+  for (const interior of run.slice(1)) stripMultipleRest(interior);
+
+  const toStart = [];
+  const toEnd = [];
+  run.forEach((measure, k) => {
+    if (k === 0 || k === n - 1) return;
+    const marks = Array.from(measure.children).filter(
+      (el) => el.tagName === "direction" || el.tagName === "sound"
+    );
+    (k < n / 2 ? toStart : toEnd).push(...marks);
+  });
+
+  // Reference nodes are computed once, before anything moves, so each
+  // batch keeps its order.
+  const startPoint = childElements(first, "note")[0]; // exists: isCollapsibleRestMeasure guarantees a note
+  const endPoint = endOfMeasureInsertionPoint(last); // null = append
+  for (const mark of toStart) first.insertBefore(mark, startPoint);
+  for (const mark of toEnd) last.insertBefore(mark, endPoint);
+}
+
+/**
+ * Puts <measure-style><multiple-rest>N</multiple-rest></measure-style>
+ * in `measure`, reusing a leading <attributes> (one in the header
+ * block: before the first note/direction) when there is one, else
+ * creating it at the end of the header block. An existing
+ * <multiple-rest> is updated in place (keeps its use-symbols
+ * attribute); extras are removed. measure-style comes last in
+ * <attributes>' content model, so appending is schema-valid.
+ * No `number` attribute: omitted means "all staves", right for a
+ * multi-staff part resting on every staff.
+ */
+function setMultipleRest(partDoc, measure, count) {
+  const existing = Array.from(measure.getElementsByTagName("multiple-rest"));
+  if (existing.length > 0) {
+    existing[0].textContent = String(count);
+    for (const extra of existing.slice(1)) removeAndPrune(extra);
+    return;
+  }
+
+  const boundary = firstNonHeaderChild(measure);
+  let attributes = null;
+  for (const el of Array.from(measure.children)) {
+    if (el === boundary) break;
+    if (el.tagName === "attributes") {
+      attributes = el;
+      break;
+    }
+  }
+  if (!attributes) {
+    attributes = partDoc.createElement("attributes");
+    measure.insertBefore(attributes, boundary); // null = append
+  }
+
+  const style = partDoc.createElement("measure-style");
+  const rest = partDoc.createElement("multiple-rest");
+  rest.textContent = String(count);
+  style.appendChild(rest);
+  attributes.appendChild(style);
+}
+
+/** Removes every <multiple-rest> in `measure`, pruning wrappers it leaves empty. */
+function stripMultipleRest(measure) {
+  for (const el of Array.from(measure.getElementsByTagName("multiple-rest"))) removeAndPrune(el);
+}
+
+/** Removes `el`, then its <measure-style> and <attributes> parents if that left them childless. */
+function removeAndPrune(el) {
+  let parent = el.parentNode;
+  parent.removeChild(el);
+  while (parent && (parent.tagName === "measure-style" || parent.tagName === "attributes") && parent.children.length === 0) {
+    const up = parent.parentNode;
+    up.removeChild(parent);
+    parent = up;
+  }
 }

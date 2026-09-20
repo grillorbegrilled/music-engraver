@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Part extraction check (plan steps 5-6)</title>
+    <title>Part extraction check (plan steps 5-7)</title>
     <style>
       :root {
         --bg: #fbfbfa; --ink: #1f2328; --muted: #656d76; --line: #d8dee4;
@@ -55,13 +55,16 @@
     <main>
       <h1>Part extraction check</h1>
       <p class="lede">
-        Plan steps 5 and 6. Pick one or more MusicXML files. Each goes through
+        Plan steps 5, 6 and 7. Pick one or more MusicXML files. Each goes through
         <code>preprocessMusicXml()</code> then <code>extractParts()</code>, and every extracted
         part is loaded into Verovio on its own and drawn (page 1 only). Serve from the same
         folder as <code>verovio-engine.js</code>, <code>musicxml-fixups.js</code> and
         <code>part-extraction.js</code>, over http (<code>python -m http.server</code>).
         Step 6 adds a "Global marks" column: every part should carry the same rehearsal letters,
         tempo/metronome, segno/coda and D.S./D.C./To Coda/Fine as every other part, measure by measure.
+        Step 7 adds a "Multi-rests" column: runs of 2+ rest-only measures should be collapsed into
+        one <code>&lt;multiple-rest&gt;</code>, never across a double/final barline, repeat, volta ending or
+        meter/key/clef change, and with no direction/sound left stranded on an interior bar.
         Layout here is a rough landscape Letter stand-in, not the final part layout (plan §4.2 and §4.3).
       </p>
 
@@ -208,6 +211,56 @@
         return { totalMarks, measureCount, perPart };
       }
 
+      // Step 7: independent check of rest-run collapsing in an extracted part
+      // (does not share code with part-extraction.js on purpose; same rules,
+      // written separately). Returns { runs: [{start, len}], problems: [] }.
+      // BEGIN restChecks
+      function restChecks(xmlText) {
+        const d = new DOMParser().parseFromString(xmlText, "application/xml");
+        const measures = [...d.getElementsByTagName("measure")];
+        const kidsOf = (el, tag) => [...el.children].filter((c) => c.tagName === tag);
+        const restOnly = (m) => {
+          const notes = kidsOf(m, "note");
+          return notes.length > 0 && notes.every((n) => kidsOf(n, "rest").length) &&
+            m.getAttribute("implicit") !== "yes" && !kidsOf(m, "harmony").length && !kidsOf(m, "figured-bass").length;
+        };
+        const hard = (m, loc) => kidsOf(m, "barline").some((b) =>
+          (b.getAttribute("location") || "right") === loc &&
+          (["light-light", "light-heavy", "heavy-light", "heavy-heavy"].includes((kidsOf(b, "bar-style")[0] || { textContent: "" }).textContent.trim()) ||
+            ["repeat", "ending", "segno", "coda"].some((t) => kidsOf(b, t).length)));
+        const stateChange = (m) => kidsOf(m, "attributes").some((a) => [...a.children].some((c) => ["time", "key", "clef", "transpose", "staves"].includes(c.tagName)));
+        const canJoin = (i) => i > 0 && restOnly(measures[i - 1]) && restOnly(measures[i]) &&
+          !hard(measures[i - 1], "right") && !hard(measures[i], "left") && !stateChange(measures[i]);
+
+        const problems = [], runs = [];
+        const covered = new Array(measures.length).fill(false);
+        measures.forEach((m, i) => {
+          const mr = m.getElementsByTagName("multiple-rest");
+          if (mr.length > 1) problems.push(`m${i + 1}: ${mr.length} multiple-rest elements`);
+          if (!mr.length) return;
+          const len = Number(mr[0].textContent.trim());
+          if (!(len >= 2) || i + len > measures.length) { problems.push(`m${i + 1}: bad multiple-rest value "${mr[0].textContent}"`); return; }
+          runs.push({ start: i + 1, len });
+          for (let j = i; j < i + len; j++) {
+            if (covered[j]) problems.push(`m${j + 1}: in two runs`);
+            covered[j] = true;
+            if (!restOnly(measures[j])) problems.push(`m${j + 1}: not rest-only but inside run at m${i + 1}`);
+            if (j > i && !canJoin(j)) problems.push(`m${j + 1}: run at m${i + 1} crosses a boundary / notation change`);
+            if (j > i && j < i + len - 1 && kidsOf(measures[j], "direction").concat(kidsOf(measures[j], "sound")).length)
+              problems.push(`m${j + 1}: direction/sound stranded inside run at m${i + 1}`);
+            if (j > i && measures[j].getElementsByTagName("multiple-rest").length) problems.push(`m${j + 1}: stray multiple-rest inside run`);
+          }
+          const nxt = measures[i + len];
+          if (nxt && canJoin(i + len)) problems.push(`m${i + 1}: run of ${len} stops short; m${i + len + 1} could have joined`);
+        });
+        // Any joinable rest-only pair not covered by a run was missed.
+        measures.forEach((m, i) => {
+          if (canJoin(i) && !(covered[i] && covered[i - 1])) problems.push(`m${i} and m${i + 1}: rest-only, joinable, not collapsed`);
+        });
+        return { runs, problems };
+      }
+      // END restChecks
+
       async function checkFile(file) {
         const S = file.name;
         const block = el("section", {}, el("h2", {}, file.name));
@@ -245,7 +298,7 @@
               el("th", {}, "#"), el("th", {}, "Part"), el("th", {}, "XML checks"),
               el("th", {}, "Verovio load"), el("th", {}, "Pages"),
               el("th", {}, "Title drawn"), el("th", {}, "Part name drawn by Verovio"),
-              el("th", {}, "Global marks")))
+              el("th", {}, "Global marks"), el("th", {}, "Multi-rests")))
           );
           const tbody = el("tbody");
           table.append(tbody);
@@ -282,7 +335,13 @@
                  pr.navMissing.length ? "sound without visual: " + pr.navMissing.slice(0, 6).join("; ") : ""].filter(Boolean).join(" | ")
               : "ok";
 
-            const passed = xcFail.length === 0 && loaded && pageCount >= 1 && !propBad;
+            const rc = restChecks(p.xmlText);
+            const restBad = rc.problems.length > 0;
+            const restText = restBad
+              ? rc.problems.slice(0, 5).join("; ") + (rc.problems.length > 5 ? ` (+${rc.problems.length - 5} more)` : "")
+              : rc.runs.length ? `${rc.runs.length} run(s), ${rc.runs.reduce((n, r) => n + r.len, 0)} bars: ` + rc.runs.map((r) => `m${r.start}×${r.len}`).join(" ") : "none";
+
+            const passed = xcFail.length === 0 && loaded && pageCount >= 1 && !propBad && !restBad;
             tbody.append(
               el("tr", {},
                 el("td", {}, i + 1),
@@ -292,11 +351,12 @@
                 el("td", {}, pageCount || "-"),
                 el("td", {}, titleDrawn),
                 el("td", {}, nameDrawn),
-                el("td", {}, propBad ? el("span", { class: "fail" }, propText) : propText))
+                el("td", {}, propBad ? el("span", { class: "fail" }, propText) : propText),
+                el("td", {}, restBad ? el("span", { class: "fail" }, restText) : restText))
             );
             report.push(
               `[${passed ? "PASS" : "FAIL"}] ${S} / ${p.name} (${p.id}): xml=${xcFail.length ? "failed(" + xcFail.join("; ") + ")" : "ok"}, ` +
-                `load=${loaded}, pages=${pageCount}, titleDrawn=${titleDrawn}, partNameDrawn=${nameDrawn}, globalMarks=${propText}${loadErr ? ", err=" + loadErr : ""}`
+                `load=${loaded}, pages=${pageCount}, titleDrawn=${titleDrawn}, partNameDrawn=${nameDrawn}, globalMarks=${propText}, multiRests=${restText}${loadErr ? ", err=" + loadErr : ""}`
             );
             if (svg1) {
               gallery.append(el("figure", {}, el("img", { src: svgUrl(svg1), alt: p.name }), el("figcaption", {}, `${p.name}, page 1 of ${pageCount}`)));
