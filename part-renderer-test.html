@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Part renderer check (plan step 8)</title>
+    <style>
+      :root {
+        --bg: #fbfbfa; --ink: #1f2328; --muted: #656d76; --line: #d8dee4;
+        --pass: #1a7f37; --fail: #cf222e; --warn: #9a6700; --panel: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14171a; --ink: #e6e8ea; --muted: #9aa4ae; --line: #2c333a;
+          --pass: #3fb950; --fail: #ff7b72; --warn: #d29922; --panel: #1b1f23;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--ink);
+        font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 960px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      h2 { font-size: 17px; margin: 0 0 8px; }
+      p.lede { margin: 0 0 20px; color: var(--muted); max-width: 72ch; }
+      section {
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 6px; padding: 16px; margin-bottom: 16px;
+      }
+      button, input[type="file"]::file-selector-button {
+        font: inherit; padding: 6px 12px; border: 1px solid var(--line);
+        border-radius: 6px; background: var(--panel); color: var(--ink); cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      input[type="number"] { font: inherit; width: 90px; padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+      .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { font-weight: 600; }
+      .badge {
+        display: inline-block; min-width: 44px; text-align: center; font-size: 12px;
+        font-weight: 700; padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor;
+      }
+      .pass { color: var(--pass); }
+      .fail { color: var(--fail); }
+      .warn { color: var(--warn); }
+      .info { color: var(--muted); }
+      .detail { color: var(--muted); font-size: 13px; }
+      .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; margin-top: 8px; }
+      .pages figure { margin: 0; }
+      .pages img { width: 100%; height: auto; background: #fff; border: 1px solid var(--line); }
+      .pages figcaption { font-size: 12px; color: var(--muted); }
+      code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Part renderer check</h1>
+      <p class="lede">
+        Plan step 8 (<code>part-renderer.js</code>, §4.2 and §4.3). Serve this folder over http
+        (<code>python -m http.server</code>) next to <code>verovio-engine.js</code>,
+        <code>musicxml-fixups.js</code>, <code>part-extraction.js</code> and
+        <code>part-renderer.js</code>.
+        <br /><br />
+        <strong>Section 1</strong> runs real files through <code>preprocessMusicXml()</code> →
+        <code>extractParts()</code> → <code>renderPartsToSvg()</code>. Every part should land on one
+        page unless the "Fit" column says otherwise; the SVG page should be landscape Letter; and the
+        on-screen toolkit (<code>getToolkit()</code>) must render exactly what it did before the batch.
+        Compare parts of very different density (a sparse part vs. a busy one): sparse parts should sit
+        at a large scale, busy ones at a small one, all filling the page height.
+        <br /><br />
+        <strong>Section 2</strong> builds a synthetic single part of N dense measures to force the
+        fallback tiers. Use "Run sweep" to find where one page turns into two, then check the
+        two-page result by eye: two comfortably-sized pages, not one cramped page's floor scale.
+      </p>
+
+      <section>
+        <h2>1. Real files</h2>
+        <div class="toolbar">
+          <input id="files" type="file" multiple accept=".xml,.musicxml" disabled />
+          <button id="copy" type="button">Copy results as text</button>
+          <span id="status" class="detail">Starting Verovio…</span>
+        </div>
+        <div id="out"></div>
+      </section>
+
+      <section>
+        <h2>2. Synthetic long part (forces the two-page fallback)</h2>
+        <div class="toolbar">
+          <label>Measures <input id="n" type="number" min="1" max="3000" value="260" /></label>
+          <button id="run-one" type="button" disabled>Render this many</button>
+          <button id="run-sweep" type="button" disabled>Run sweep (50 … 800)</button>
+        </div>
+        <div id="synth-out"></div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { getToolkit, createToolkitInstance } from "./verovio-engine.js";
+      import { preprocessMusicXml } from "./musicxml-fixups.js";
+      import { extractParts } from "./part-extraction.js";
+      import { renderPartsToSvg, fitPartToPages, MIN_PART_SCALE, MAX_PART_SCALE } from "./part-renderer.js";
+
+      const report = [];
+      const outEl = document.getElementById("out");
+      const synthEl = document.getElementById("synth-out");
+      const statusEl = document.getElementById("status");
+      let mainTk = null;
+
+      function el(tag, attrs = {}, ...children) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs)) {
+          if (k === "class") node.className = v;
+          else node.setAttribute(k, v);
+        }
+        for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        return node;
+      }
+      const badge = (status) =>
+        el("span", { class: `badge ${status === "PASS" ? "pass" : status === "FAIL" ? "fail" : status === "NOTE" ? "warn" : "info"}` }, status);
+      const svgUrl = (svg) => URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+
+      // Landscape Letter is 279.4 x 215.9 -> ratio 1.294. Reads the root
+      // <svg> width/height attributes (with mmOutput they carry units).
+      function svgAspect(svgStr) {
+        const root = new DOMParser().parseFromString(svgStr, "image/svg+xml").documentElement;
+        const w = parseFloat(root.getAttribute("width"));
+        const h = parseFloat(root.getAttribute("height"));
+        if (!w || !h) return null;
+        return w / h;
+      }
+      const LANDSCAPE_RATIO = 279.4 / 215.9;
+      const isLandscapeLetter = (svg) => {
+        const r = svgAspect(svg);
+        return r === null ? null : Math.abs(r - LANDSCAPE_RATIO) < 0.02;
+      };
+
+      const fitText = (fit) =>
+        fit === "one-page" ? "one page" : fit === "two-page" ? "two pages (tier 2)" : "OVERFLOW (>2 pages at min scale)";
+
+      // --- Main toolkit isolation check ---------------------------------
+      // Loads a tiny score into the on-screen toolkit, records its SVG,
+      // and returns a function that re-renders and compares afterwards.
+      const PROBE_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0"><work><work-title>Main toolkit probe</work-title></work>
+<part-list><score-part id="P1"><part-name>Probe</part-name></score-part></part-list>
+<part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note></measure></part></score-partwise>`;
+      function probeMainToolkit() {
+        mainTk.setOptions({ scale: 77, pageWidth: 2100, pageHeight: 2970, systemMaxPerPage: 1 });
+        mainTk.loadData(PROBE_XML);
+        const before = { pages: mainTk.getPageCount(), svg: mainTk.renderToSVG(1) };
+        return () => {
+          mainTk.redoLayout();
+          const after = { pages: mainTk.getPageCount(), svg: mainTk.renderToSVG(1) };
+          return before.pages === after.pages && before.svg === after.svg;
+        };
+      }
+
+      // --- Section 1 -----------------------------------------------------
+      async function checkFile(file) {
+        const S = file.name;
+        const block = el("section", {}, el("h2", {}, S));
+        outEl.append(block);
+        try {
+          statusEl.textContent = `Reading ${S}…`;
+          const raw = await file.text();
+          const fixed = preprocessMusicXml(raw);
+          const parts = extractParts(fixed);
+          if (!parts.length) throw new Error("extractParts() returned no parts.");
+
+          const srcDoc = new DOMParser().parseFromString(fixed, "application/xml");
+          const measureCounts = new Map(
+            [...srcDoc.getElementsByTagName("part")].map((p) => [p.getAttribute("id"), p.getElementsByTagName("measure").length])
+          );
+
+          const isolationCheck = probeMainToolkit();
+          const t0 = performance.now();
+          const rendered = await renderPartsToSvg(parts, {
+            onProgress: (done, total, name) => (statusEl.textContent = `Preparing parts… (${done + 1} of ${total}: ${name})`),
+          });
+          const totalMs = Math.round(performance.now() - t0);
+          const isolated = isolationCheck();
+
+          const summary = el("div", { class: "detail" },
+            `${rendered.length} of ${parts.length} parts rendered in ${(totalMs / 1000).toFixed(1)} s (${Math.round(totalMs / parts.length)} ms/part avg). Main toolkit unchanged by the batch: `,
+            badge(isolated ? "PASS" : "FAIL"));
+          block.append(summary);
+          report.push(`[${isolated ? "PASS" : "FAIL"}] ${S}: main toolkit untouched by batch; ${rendered.length}/${parts.length} parts rendered in ${totalMs} ms`);
+
+          const table = el("table", {},
+            el("thead", {}, el("tr", {}, ...["#", "Part", "Measures", "Fit", "Scale", "Pages", "Landscape Letter", "Result"].map((h) => el("th", {}, h)))),
+          );
+          const tbody = el("tbody");
+          table.append(tbody);
+          const gallery = el("div", { class: "pages" });
+
+          const byId = new Map(rendered.map((r) => [r.id, r]));
+          parts.forEach((p, i) => {
+            const r = byId.get(p.id);
+            if (!r) {
+              tbody.append(el("tr", {}, el("td", {}, i + 1), el("td", {}, `${p.name} (${p.id})`), el("td", {}, "-"), el("td", {}, "-"), el("td", {}, "-"), el("td", {}, "-"), el("td", {}, "-"),
+                el("td", {}, badge("FAIL"), " skipped (see console)")));
+              report.push(`[FAIL] ${S} / ${p.name} (${p.id}): skipped by renderer`);
+              return;
+            }
+            const land = r.pages.map(isLandscapeLetter);
+            const landText = land.includes(false) ? "no" : land.includes(null) ? "n/a" : "yes";
+            const scaleOk = r.scale >= MIN_PART_SCALE && r.scale <= MAX_PART_SCALE;
+            // one-page is the goal; two-page is legal but worth a look; overflow is a known limitation.
+            const status = landText === "no" || !scaleOk || r.pageCount !== r.pages.length ? "FAIL" : r.fit === "one-page" ? "PASS" : "NOTE";
+            tbody.append(el("tr", {},
+              el("td", {}, i + 1),
+              el("td", {}, `${p.name} (${p.id})`),
+              el("td", {}, measureCounts.get(p.id) ?? "-"),
+              el("td", { class: r.fit === "one-page" ? "" : "warn" }, fitText(r.fit)),
+              el("td", {}, `${r.scale}%`),
+              el("td", {}, r.pageCount),
+              el("td", { class: landText === "no" ? "fail" : "" }, landText),
+              el("td", {}, badge(status))));
+            report.push(`[${status}] ${S} / ${p.name} (${p.id}): fit=${r.fit}, scale=${r.scale}, pages=${r.pageCount}, landscapeLetter=${landText}`);
+            r.pages.forEach((svg, k) =>
+              gallery.append(el("figure", {}, el("img", { src: svgUrl(svg), alt: p.name }), el("figcaption", {}, `${p.name} — page ${k + 1} of ${r.pageCount} @ ${r.scale}%`))));
+          });
+          block.append(table, gallery);
+        } catch (err) {
+          const msg = String(err && err.message ? err.message : err);
+          block.append(el("div", { class: "detail" }, "Error: " + msg));
+          report.push(`[FAIL] ${S}: ${msg}`);
+        }
+        statusEl.textContent = "Done.";
+      }
+
+      // --- Section 2: synthetic dense part --------------------------------
+      // One part, 4/4, sixteen 16th notes per measure cycling through a
+      // scale. Dense enough that page count grows with N.
+      function denseScoreXml(nMeasures) {
+        const steps = ["C", "D", "E", "F", "G", "A", "B"];
+        const measures = [];
+        for (let m = 1; m <= nMeasures; m++) {
+          let notes = "";
+          for (let k = 0; k < 16; k++) {
+            const step = steps[(m * 3 + k) % 7];
+            notes += `<note><pitch><step>${step}</step><octave>${4 + ((k + m) % 2)}</octave></pitch><duration>1</duration><type>16th</type></note>`;
+          }
+          const attrs = m === 1
+            ? `<attributes><divisions>4</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>`
+            : "";
+          measures.push(`<measure number="${m}">${attrs}${notes}</measure>`);
+        }
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0"><work><work-title>Synthetic dense part (${nMeasures} bars)</work-title></work>
+<identification><creator type="composer">Test</creator></identification>
+<part-list><score-part id="P1"><part-name>Dense</part-name></score-part></part-list>
+<part id="P1">${measures.join("")}</part></score-partwise>`;
+      }
+
+      async function renderSynthetic(n, tk) {
+        const t0 = performance.now();
+        const r = fitPartToPages(tk, denseScoreXml(n));
+        return { n, ...r, ms: Math.round(performance.now() - t0) };
+      }
+
+      function showSynthetic(rows, withGallery) {
+        synthEl.replaceChildren();
+        const table = el("table", {}, el("thead", {}, el("tr", {}, ...["Measures", "Fit", "Scale", "Pages", "Time"].map((h) => el("th", {}, h)))));
+        const tbody = el("tbody");
+        table.append(tbody);
+        for (const r of rows) {
+          tbody.append(el("tr", {}, el("td", {}, r.n), el("td", { class: r.fit === "one-page" ? "" : "warn" }, fitText(r.fit)), el("td", {}, `${r.scale}%`), el("td", {}, r.pageCount), el("td", {}, `${r.ms} ms`)));
+          report.push(`[INFO] synthetic ${r.n} measures: fit=${r.fit}, scale=${r.scale}, pages=${r.pageCount}, ${r.ms} ms`);
+        }
+        synthEl.append(table);
+        if (withGallery) {
+          const r = rows[0];
+          const g = el("div", { class: "pages" });
+          r.pages.forEach((svg, k) => g.append(el("figure", {}, el("img", { src: svgUrl(svg) }), el("figcaption", {}, `${r.n} measures — page ${k + 1} of ${r.pageCount} @ ${r.scale}%`))));
+          synthEl.append(g);
+        }
+      }
+
+      async function runSynthetic(counts, withGallery) {
+        const tk = await createToolkitInstance();
+        const rows = [];
+        try {
+          for (const n of counts) {
+            statusEl.textContent = `Synthetic part: ${n} measures…`;
+            await new Promise((r) => setTimeout(r, 0));
+            rows.push(await renderSynthetic(n, tk));
+            showSynthetic(rows, false);
+          }
+        } finally {
+          tk.destroy();
+        }
+        showSynthetic(rows, withGallery);
+        statusEl.textContent = "Done.";
+      }
+
+      document.getElementById("run-one").addEventListener("click", () => {
+        const n = Math.max(1, Math.min(3000, parseInt(document.getElementById("n").value, 10) || 1));
+        runSynthetic([n], true);
+      });
+      document.getElementById("run-sweep").addEventListener("click", () => runSynthetic([50, 100, 150, 200, 250, 300, 400, 500, 650, 800], false));
+
+      document.getElementById("files").addEventListener("change", async (e) => {
+        outEl.replaceChildren();
+        report.length = 0;
+        for (const f of [...e.target.files]) await checkFile(f);
+      });
+
+      document.getElementById("copy").addEventListener("click", async (e) => {
+        try {
+          await navigator.clipboard.writeText(report.join("\n"));
+          e.target.textContent = "Copied";
+        } catch (err) {
+          e.target.textContent = "Copy failed (see console)";
+          console.log(report.join("\n"));
+        }
+        setTimeout(() => (e.target.textContent = "Copy results as text"), 1800);
+      });
+
+      getToolkit().then(
+        (t) => {
+          mainTk = t;
+          statusEl.textContent = `Verovio ${mainTk.getVersion ? mainTk.getVersion() : ""} ready. Pick files.`;
+          for (const id of ["files", "run-one", "run-sweep"]) document.getElementById(id).disabled = false;
+        },
+        (err) => (statusEl.textContent = "Could not start Verovio: " + (err && err.message ? err.message : err))
+      );
+    </script>
+  </body>
+</html>
