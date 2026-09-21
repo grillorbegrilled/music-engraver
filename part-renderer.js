@@ -178,7 +178,203 @@ export function fitPartToPages(tk, partXmlText) {
   }
   const pages = [];
   for (let p = 1; p <= pageCount; p++) pages.push(tk.renderToSVG(p));
-  return { pages, pageCount, scale, fit };
+  return { pages: restoreMultiRestRehearsals(pages, partXmlText), pageCount, scale, fit };
+}
+
+// --- Rehearsal marks over multi-measure rests -------------------------
+//
+// Verovio (6.3.0) does not draw a <rehearsal> that sits on the first
+// measure of a <multiple-rest> run, even though part-extraction.js
+// leaves it there in the right place (attributes/multiple-rest, then
+// the rehearsal <direction>, then the rest). The same mark on any
+// ordinary measure renders fine. Rather than guess at Verovio's
+// internals, the missing box is drawn into the SVG after the fact,
+// copying the geometry Verovio itself uses for a rehearsal box (see the
+// constants). A measure that already has a Verovio-drawn <g class="reh">
+// is left alone, so this becomes a no-op if a later Verovio fixes it.
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Rehearsal-box geometry in Verovio's SVG units at staff-line spacing
+// 180 (the value at every notation scale; scale is applied by the
+// viewBox). Measured from Verovio's own boxes for letters A and C:
+// box top sits 640 above the top staff line, 498 tall, baseline 370
+// below the box top, 405px bold Times, centered on the measure's left
+// edge.
+const REH_BOX_TOP_ABOVE_STAFF = 640;
+const REH_BOX_HEIGHT = 498;
+const REH_BASELINE_BELOW_BOX_TOP = 370;
+const REH_FONT_SIZE = 405;
+const REH_BOX_PADDING = 150; // total left+right, so one capital ~ 440 wide
+const REH_BOX_GAP = 60; // between two marks on the same measure
+
+/**
+ * Draws any rehearsal marks Verovio dropped over multi-measure rests.
+ * Returns the pages unchanged if nothing is missing, or if the SVG
+ * doesn't line up with the part (different number of multi-rests than
+ * the XML has) — a wrong guess would be worse than a missing letter.
+ *
+ * @param {string[]} pages - SVG per page, from tk.renderToSVG()
+ * @param {string} partXmlText - the part's MusicXML, as loaded
+ * @returns {string[]}
+ */
+export function restoreMultiRestRehearsals(pages, partXmlText) {
+  try {
+    const expected = multiRestRehearsalLabels(partXmlText);
+    if (!expected.some((labels) => labels.length > 0)) return pages;
+
+    const parser = new DOMParser();
+    const docs = pages.map((svg) => parser.parseFromString(svg, "image/svg+xml"));
+    const perPage = docs.map(multiRestMeasures);
+    const total = perPage.reduce((n, list) => n + list.length, 0);
+    if (total !== expected.length) {
+      console.warn(
+        `[part-renderer] found ${total} multi-rest(s) in the SVG but ${expected.length} in the XML; ` +
+          "rehearsal marks over multi-rests not restored."
+      );
+      return pages;
+    }
+
+    const serializer = new XMLSerializer();
+    let runIndex = 0;
+    return pages.map((svg, i) => {
+      let changed = false;
+      for (const measure of perPage[i]) {
+        const labels = expected[runIndex++];
+        if (labels.length === 0 || hasRehearsalBox(measure)) continue;
+        if (drawRehearsalBoxes(docs[i], measure, labels)) changed = true;
+      }
+      return changed ? serializer.serializeToString(docs[i]) : svg;
+    });
+  } catch (err) {
+    console.warn("[part-renderer] could not restore multi-rest rehearsal marks:", err);
+    return pages;
+  }
+}
+
+/**
+ * For each measure of the part that carries <multiple-rest>, in score
+ * order: the text of its start-of-measure rehearsal marks (possibly
+ * none). One entry per multi-rest, matching multiRestMeasures().
+ */
+function multiRestRehearsalLabels(partXmlText) {
+  const doc = new DOMParser().parseFromString(partXmlText, "application/xml");
+  const runs = [];
+  for (const measure of Array.from(doc.getElementsByTagName("measure"))) {
+    if (measure.getElementsByTagName("multiple-rest").length === 0) continue;
+    const kids = Array.from(measure.children);
+    let lastNote = -1;
+    kids.forEach((el, i) => {
+      if (el.tagName === "note") lastNote = i;
+    });
+    const labels = [];
+    kids.forEach((el, i) => {
+      if (el.tagName !== "direction" || (lastNote >= 0 && i > lastNote)) return;
+      for (const reh of Array.from(el.getElementsByTagName("rehearsal"))) {
+        const text = reh.textContent.trim();
+        if (text) labels.push(text);
+      }
+    });
+    runs.push(labels);
+  }
+  return runs;
+}
+
+const hasClass = (el, name) => (el.getAttribute("class") || "").split(/\s+/).includes(name);
+
+/** The <g class="measure"> of every multi-rest on a page, once each, in document order. */
+function multiRestMeasures(svgDoc) {
+  const measures = [];
+  for (const g of Array.from(svgDoc.getElementsByTagName("g"))) {
+    if (!hasClass(g, "multiRest")) continue;
+    let node = g.parentNode;
+    while (node && !(node.nodeType === 1 && hasClass(node, "measure"))) node = node.parentNode;
+    if (node && !measures.includes(node)) measures.push(node);
+  }
+  return measures;
+}
+
+function hasRehearsalBox(measure) {
+  return Array.from(measure.children).some((el) => el.tagName === "g" && hasClass(el, "reh"));
+}
+
+/** Rough width of a bold Times rehearsal label at REH_FONT_SIZE. */
+function rehearsalTextWidth(label, k) {
+  let w = 0;
+  for (const ch of label) w += (/[A-Z]/.test(ch) ? 292 : /[0-9]/.test(ch) ? 202 : 200) * k;
+  return w;
+}
+
+/**
+ * Appends one boxed label per entry of `labels` to `measure`, centered
+ * on the measure's left edge (side by side if there's more than one).
+ * Returns false if the staff geometry can't be read.
+ */
+function drawRehearsalBoxes(svgDoc, measure, labels) {
+  const staff = Array.from(measure.children).find((el) => el.tagName === "g" && hasClass(el, "staff"));
+  if (!staff) return false;
+  const lines = Array.from(staff.getElementsByTagName("path"))
+    .map((path) => (path.getAttribute("d") || "").match(/^M\s*(-?[\d.]+)\s+(-?[\d.]+)/))
+    .filter(Boolean)
+    .map((m) => ({ x: Number(m[1]), y: Number(m[2]) }));
+  if (lines.length < 2) return false;
+
+  const left = lines[0].x;
+  const top = lines[0].y;
+  const spacing = lines[1].y - lines[0].y;
+  const k = spacing > 0 ? spacing / 180 : 1;
+
+  const widths = labels.map((label) => REH_BOX_PADDING * k + rehearsalTextWidth(label, k));
+  const gap = REH_BOX_GAP * k;
+  const totalWidth = widths.reduce((a, b) => a + b, 0) + gap * (labels.length - 1);
+
+  const boxTop = Math.round(top - REH_BOX_TOP_ABOVE_STAFF * k);
+  let x = left - totalWidth / 2;
+  labels.forEach((label, i) => {
+    const width = widths[i];
+    measure.appendChild(buildRehearsalBox(svgDoc, label, x, boxTop, width, k));
+    x += width + gap;
+  });
+  return true;
+}
+
+function buildRehearsalBox(svgDoc, label, x, boxTop, width, k) {
+  const make = (tag, attrs) => {
+    const el = svgDoc.createElementNS(SVG_NS, tag);
+    for (const [name, value] of Object.entries(attrs)) el.setAttribute(name, String(value));
+    return el;
+  };
+
+  const g = make("g", { class: "reh" });
+  g.appendChild(
+    make("rect", {
+      "stroke-width": Math.round(20 * k),
+      stroke: "currentColor",
+      "fill-opacity": 0,
+      x: Math.round(x),
+      y: boxTop,
+      height: Math.round(REH_BOX_HEIGHT * k),
+      width: Math.round(width),
+    })
+  );
+
+  const text = make("text", {
+    x: Math.round(x + width / 2),
+    y: Math.round(boxTop + REH_BASELINE_BELOW_BOX_TOP * k),
+    "text-anchor": "middle",
+    "font-size": "0px",
+    "font-family": "Times",
+    "font-weight": "bold",
+  });
+  const rend = make("tspan", { class: "rend" });
+  const inner = make("tspan", { class: "text" });
+  const run = make("tspan", { "font-size": `${Math.round(REH_FONT_SIZE * k)}px` });
+  run.textContent = label;
+  inner.appendChild(run);
+  rend.appendChild(inner);
+  text.appendChild(rend);
+  g.appendChild(text);
+  return g;
 }
 
 /** Lets the browser paint (status text, progress) between heavy parts. */
