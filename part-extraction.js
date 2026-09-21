@@ -574,10 +574,12 @@ function collapseRestRuns(partDoc) {
 
 /**
  * Groups measures into runs of consecutive collapsible rest measures
- * (length >= MIN_REST_RUN only), split at hard boundaries and at
- * measures that change meter/key/clef. Measures drawn as measure
- * repeats (`repeatStyled`) are never collapsible: they break a run
- * just like a measure with notes in it.
+ * (length >= MIN_REST_RUN only), split at hard boundaries, at
+ * measures that change meter/key/clef, and at rehearsal marks (a
+ * rehearsal letter/number always starts a fresh multi-rest — see
+ * rehearsalEdges). Measures drawn as measure repeats (`repeatStyled`)
+ * are never collapsible: they break a run just like a measure with
+ * notes in it.
  *
  * @param {Element[]} measures
  * @param {Set<Element>} repeatStyled — from findMeasureRepeatMeasures
@@ -596,10 +598,15 @@ function findRestRuns(measures, repeatStyled) {
       flush();
       continue;
     }
-    if (run.length > 0 && (isHardBoundary(run[run.length - 1], measure) || changesNotationState(measure))) {
+    const edges = rehearsalEdges(measure);
+    if (
+      run.length > 0 &&
+      (isHardBoundary(run[run.length - 1], measure) || changesNotationState(measure) || edges.atStart)
+    ) {
       flush();
     }
     run.push(measure);
+    if (edges.atEnd) flush(); // mark sits on the far barline: nothing after it may join
   }
   flush();
 
@@ -686,6 +693,45 @@ function isCollapsibleRestMeasure(measure) {
   return true;
 }
 
+/**
+ * Where rehearsal marks (letters/numbers) sit in `measure`:
+ *   - atStart: a <direction> holding a <rehearsal>, before the
+ *     measure's last <note> — the normal case, and what
+ *     propagateGlobalMarks() produces (header boundary).
+ *   - atEnd: one after the last <note> (same test as
+ *     collectGlobalMarks' `atEnd`), i.e. labelling the far barline.
+ *
+ * A rehearsal mark names a place in the part, and a multi-rest is one
+ * unbroken bar. If one were left inside a run, applyRestRun() would
+ * have to drag it to an edge of the run — so "A" over bar 5 of an
+ * 8-bar rest would end up over bar 8 (or bar 1), the wrong place, and
+ * on the end edge Verovio doesn't draw it at the right spot. Engraving
+ * convention agrees: rests are broken at rehearsal marks. So
+ * findRestRuns splits runs so a mark is always on the first measure of
+ * a run (atStart) or the last (atEnd), where it already sits correctly.
+ *
+ * Only <rehearsal> counts. Other stranded directions/sounds are still
+ * relocated by applyRestRun; they have no fixed place to keep.
+ *
+ * @returns {{atStart: boolean, atEnd: boolean}}
+ */
+function rehearsalEdges(measure) {
+  const kids = Array.from(measure.children);
+  let lastNote = -1;
+  kids.forEach((el, i) => {
+    if (el.tagName === "note") lastNote = i;
+  });
+
+  const edges = { atStart: false, atEnd: false };
+  kids.forEach((el, i) => {
+    if (el.tagName !== "direction") return;
+    if (!directionContent(el).some((c) => c.tagName === "rehearsal")) return;
+    if (lastNote >= 0 && i > lastNote) edges.atEnd = true;
+    else edges.atStart = true;
+  });
+  return edges;
+}
+
 /** True if `measure` has an <attributes> child carrying a NOTATION_STATE_TAGS element. */
 function changesNotationState(measure) {
   return childElements(measure, "attributes").some((attrs) =>
@@ -728,7 +774,8 @@ function isHardBoundary(measureBefore, measureAfter) {
  * edge of the run it's nearer.
  *
  * MusicXML can't say "this happens 3 bars into an 8-bar rest", so an
- * interior mark has nowhere to render once the bars visually merge:
+ * interior mark has nowhere to render once the bars visually merge.
+ * (Rehearsal marks never get here: findRestRuns splits runs at them.)
  *   - run-relative index < N/2  -> start of `first`, immediately
  *     before its first <note> (so after the measure's own leading
  *     attributes/marks: chronological order is kept — what `first`
