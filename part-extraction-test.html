@@ -219,9 +219,23 @@
         const d = new DOMParser().parseFromString(xmlText, "application/xml");
         const measures = [...d.getElementsByTagName("measure")];
         const kidsOf = (el, tag) => [...el.children].filter((c) => c.tagName === tag);
+        // Measure-repeat symbol beats rest content: a measure inside start..stop
+        // (or start..end of part) is never rest-only for this purpose.
+        const styled = new Set(), open = new Set();
+        measures.forEach((m) => {
+          let hit = open.size > 0;
+          for (const st of m.getElementsByTagName("measure-style")) {
+            const r = kidsOf(st, "measure-repeat")[0];
+            if (!r) continue;
+            const key = st.getAttribute("number") || "_default", type = r.getAttribute("type");
+            if (type === "start") { open.add(key); hit = true; }
+            else if (type === "stop") { if (open.has(key)) hit = true; open.delete(key); }
+          }
+          if (hit) styled.add(m);
+        });
         const restOnly = (m) => {
           const notes = kidsOf(m, "note");
-          return notes.length > 0 && notes.every((n) => kidsOf(n, "rest").length) &&
+          return !styled.has(m) && notes.length > 0 && notes.every((n) => kidsOf(n, "rest").length) &&
             m.getAttribute("implicit") !== "yes" && !kidsOf(m, "harmony").length && !kidsOf(m, "figured-bass").length;
         };
         const hard = (m, loc) => kidsOf(m, "barline").some((b) =>

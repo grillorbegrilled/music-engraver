@@ -561,7 +561,7 @@ function collapseRestRuns(partDoc) {
   if (!partEl) return 0;
 
   const measures = childElements(partEl, "measure");
-  const runs = findRestRuns(measures);
+  const runs = findRestRuns(measures, findMeasureRepeatMeasures(measures));
 
   const inRun = new Set(runs.flat());
   for (const measure of measures) {
@@ -575,12 +575,15 @@ function collapseRestRuns(partDoc) {
 /**
  * Groups measures into runs of consecutive collapsible rest measures
  * (length >= MIN_REST_RUN only), split at hard boundaries and at
- * measures that change meter/key/clef.
+ * measures that change meter/key/clef. Measures drawn as measure
+ * repeats (`repeatStyled`) are never collapsible: they break a run
+ * just like a measure with notes in it.
  *
  * @param {Element[]} measures
+ * @param {Set<Element>} repeatStyled — from findMeasureRepeatMeasures
  * @returns {Element[][]}
  */
-function findRestRuns(measures) {
+function findRestRuns(measures, repeatStyled) {
   const runs = [];
   let run = [];
   const flush = () => {
@@ -589,7 +592,7 @@ function findRestRuns(measures) {
   };
 
   for (const measure of measures) {
-    if (!isCollapsibleRestMeasure(measure)) {
+    if (repeatStyled.has(measure) || !isCollapsibleRestMeasure(measure)) {
       flush();
       continue;
     }
@@ -604,12 +607,69 @@ function findRestRuns(measures) {
 }
 
 /**
+ * The measures that are drawn as a measure-repeat symbol (the "%"
+ * slash bar), whatever their written content is. That symbol takes
+ * precedence over rest/not-rest: exporters (Flat, and this app's own
+ * fixNumeralRepeatDirections) leave plain rests inside these measures,
+ * so a rest-only test alone would happily fold them into a multi-rest
+ * and the repeat symbol would vanish.
+ *
+ * <measure-repeat> is a STATE, not a per-measure marker: only the
+ * measure carrying type="start" has it, and every following measure
+ * inherits it until a type="stop" — or, unterminated (legal, and
+ * exactly what fixUnterminatedMeasureRepeats worries about), to the
+ * end of the part. State is tracked per staff (<measure-style
+ * number="...">, "_default" when absent); a measure counts if ANY
+ * staff has a repeat open, since a measure whose other staff is
+ * resting isn't a plain rest either.
+ *
+ * Start and stop measures are both included. By the spec a stop
+ * measure is the first one NOT displayed as a repeat, but
+ * fixNumeralRepeatDirections puts its stop on the last measure of the
+ * block, so the two encodings disagree and the stop measure can't be
+ * classified reliably. Excluding it costs at most one bar of
+ * collapsing; including it wrongly would eat a repeat symbol. A stop
+ * with no matching open start (fixUnterminatedMeasureRepeats inserts
+ * those as leak resets in a part's first bar) marks nothing.
+ *
+ * @param {Element[]} measures — one part's measures, in order
+ * @returns {Set<Element>}
+ */
+function findMeasureRepeatMeasures(measures) {
+  const styled = new Set();
+  const open = new Set(); // staff keys with a repeat currently open
+
+  for (const measure of measures) {
+    let hit = open.size > 0; // inherited from an earlier start
+    for (const style of Array.from(measure.getElementsByTagName("measure-style"))) {
+      const repeat = childElements(style, "measure-repeat")[0];
+      if (!repeat) continue;
+      const key = style.getAttribute("number") || "_default";
+      const type = repeat.getAttribute("type");
+      if (type === "start") {
+        open.add(key);
+        hit = true;
+      } else if (type === "stop") {
+        if (open.has(key)) hit = true; // the stop bar itself: see above
+        open.delete(key);
+      }
+    }
+    if (hit) styled.add(measure);
+  }
+
+  return styled;
+}
+
+/**
  * True if every <note> in the measure is a rest. Mirrors
  * fixAllRestMeasures()'s check, but deliberately NOT its single-voice
  * restriction: that fixer had to represent the measure as one note;
  * collapsing leaves note content alone, so two voices resting
  * together still fold fine. A measure with NO notes is not rest-only
  * (same conservative call as that fixer): it breaks a run.
+ *
+ * (Measure-repeat measures are excluded separately, by
+ * findMeasureRepeatMeasures — that needs cross-measure state.)
  *
  * Also refuses, so nothing real is dropped from the drawn page:
  *   - <harmony> / <figured-bass> (chord symbols over rests are content)
