@@ -98,9 +98,70 @@
 
     <script type="module">
       import { getToolkit, createToolkitInstance } from "./verovio-engine.js";
-      import { preprocessMusicXml } from "./musicxml-fixups.js";
+      import { preprocessMusicXml, extractScoreMetadata } from "./musicxml-fixups.js";
       import { extractParts } from "./part-extraction.js";
-      import { renderPartsToSvg, fitPartToPages, MIN_PART_SCALE, MAX_PART_SCALE } from "./part-renderer.js";
+      import { renderPartsToSvg, fitPartToPages, PART_LAYOUT_MM, MIN_PART_SCALE, MAX_PART_SCALE } from "./part-renderer.js";
+      import { stampPartName, stampScoreMetadata } from "./score-overlay.js";
+
+      // Stamping needs the SVG connected to the live document (getBBox/
+      // getCTM need real layout) — same requirement main.js documents.
+      // Kept off-screen rather than display:none, which drops layout.
+      const stampHost = document.createElement("div");
+      stampHost.style.cssText = "position:absolute; left:-99999px; top:-99999px;";
+      document.body.appendChild(stampHost);
+
+      /**
+       * Runs one rendered page through the same stamp step step 9 wires
+       * into main.js: stampScoreMetadata (page 1 only) + stampPartName
+       * (every page). Also checks, on the page BEFORE stamping, whether
+       * Verovio's own pgHead already drew the composer name natively —
+       * this is the plan §7.2 open question — so a real browser run of
+       * this page settles it without anyone having to eyeball diffs.
+       * Returns { svg, ownStampFound, nativeComposerMatches }.
+       */
+      function stampAndCheckPage(svgString, { partName, pageNumber, pageCount, metadata }) {
+        const doc = new DOMParser().parseFromString(svgString, "image/svg+xml");
+        const svgEl = doc.documentElement;
+        stampHost.appendChild(svgEl);
+        try {
+          let nativeComposerMatches = [];
+          if (pageNumber === 1 && metadata.composer) {
+            const pgHead = svgEl.querySelector(".pgHead");
+            if (pgHead) {
+              nativeComposerMatches = [...pgHead.querySelectorAll("tspan, text")].filter(
+                (n) => n.textContent.trim() === metadata.composer.trim()
+              );
+            }
+          }
+
+          stampScoreMetadata(svgEl, metadata, {
+            isFirstPage: pageNumber === 1,
+            marginTopMm: PART_LAYOUT_MM.marginTopMm,
+            marginRightMm: PART_LAYOUT_MM.marginRightMm,
+            marginBottomMm: PART_LAYOUT_MM.marginBottomMm,
+            marginLeftMm: PART_LAYOUT_MM.marginLeftMm,
+          });
+          stampPartName(svgEl, partName, {
+            marginTopMm: PART_LAYOUT_MM.marginTopMm,
+            marginLeftMm: PART_LAYOUT_MM.marginLeftMm,
+          });
+
+          // Confirm our own part-name <text> actually landed as a direct
+          // child of the root <svg> (where addText() puts it) — not just
+          // that the call didn't throw.
+          const ownStampFound = [...svgEl.children].some(
+            (n) => n.tagName === "text" && n.textContent.trim() === partName.trim()
+          );
+
+          return {
+            svg: new XMLSerializer().serializeToString(svgEl),
+            ownStampFound,
+            nativeComposerMatches: nativeComposerMatches.length,
+          };
+        } finally {
+          stampHost.removeChild(svgEl);
+        }
+      }
 
       const report = [];
       const outEl = document.getElementById("out");
@@ -175,13 +236,43 @@
             [...srcDoc.getElementsByTagName("part")].map((p) => [p.getAttribute("id"), p.getElementsByTagName("measure").length])
           );
 
+          const metadata = extractScoreMetadata(fixed);
+          const stampFindings = []; // { part, pageNumber, pageCount, ownStampFound, nativeComposerMatches }
+
           const isolationCheck = probeMainToolkit();
           const t0 = performance.now();
           const rendered = await renderPartsToSvg(parts, {
             onProgress: (done, total, name) => (statusEl.textContent = `Preparing parts… (${done + 1} of ${total}: ${name})`),
+            stampPage: (svg, { part, pageNumber, pageCount }) => {
+              const { svg: stamped, ownStampFound, nativeComposerMatches } = stampAndCheckPage(svg, {
+                partName: part.name,
+                pageNumber,
+                pageCount,
+                metadata,
+              });
+              stampFindings.push({ part: part.name, pageNumber, pageCount, ownStampFound, nativeComposerMatches });
+              return stamped;
+            },
           });
           const totalMs = Math.round(performance.now() - t0);
           const isolated = isolationCheck();
+
+          const missingStamp = stampFindings.filter((f) => !f.ownStampFound);
+          const nativeComposerHits = stampFindings.filter((f) => f.nativeComposerMatches > 0);
+          block.append(
+            el("div", { class: "detail" },
+              "Part-name stamp on every page: ",
+              badge(missingStamp.length === 0 ? "PASS" : "FAIL"),
+              missingStamp.length ? ` (missing on ${missingStamp.length} page(s) — see console)` : "",
+              ". Composer drawn natively by Verovio's own pgHead (plan §7.2, still open): ",
+              badge(metadata.composer ? (nativeComposerHits.length === 0 ? "PASS (no dup)" : "NOTE") : "n/a — no composer in file")
+            )
+          );
+          if (missingStamp.length) console.warn(`${S}: stampPartName missing on`, missingStamp);
+          if (nativeComposerHits.length) {
+            console.warn(`${S}: Verovio drew the composer natively too — would double up with stampScoreMetadata`, nativeComposerHits);
+            report.push(`[NOTE] ${S}: composer "${metadata.composer}" also drawn natively by Verovio's pgHead — see score-overlay.js header comment for the fix`);
+          }
 
           const summary = el("div", { class: "detail" },
             `${rendered.length} of ${parts.length} parts rendered in ${(totalMs / 1000).toFixed(1)} s (${Math.round(totalMs / parts.length)} ms/part avg). Main toolkit unchanged by the batch: `,
@@ -256,20 +347,42 @@
 <part id="P1">${measures.join("")}</part></score-partwise>`;
       }
 
+      const SYNTH_METADATA = { composer: "Test", arranger: null, rights: null }; // matches denseScoreXml()'s <creator type="composer">
+      const SYNTH_PART_NAME = "Dense";
+
       async function renderSynthetic(n, tk) {
         const t0 = performance.now();
         const r = fitPartToPages(tk, denseScoreXml(n));
-        return { n, ...r, ms: Math.round(performance.now() - t0) };
+        const stampChecks = r.pages.map((svg, idx) =>
+          stampAndCheckPage(svg, {
+            partName: SYNTH_PART_NAME,
+            pageNumber: idx + 1,
+            pageCount: r.pageCount,
+            metadata: SYNTH_METADATA,
+          })
+        );
+        const pages = stampChecks.map((c) => c.svg);
+        const stampedOnEveryPage = stampChecks.every((c) => c.ownStampFound);
+        const nativeComposerMatches = stampChecks.reduce((sum, c) => sum + c.nativeComposerMatches, 0);
+        if (!stampedOnEveryPage) console.warn(`synthetic ${n} measures: stampPartName missing on some page(s)`, stampChecks);
+        return { n, ...r, pages, stampedOnEveryPage, nativeComposerMatches, ms: Math.round(performance.now() - t0) };
       }
 
       function showSynthetic(rows, withGallery) {
         synthEl.replaceChildren();
-        const table = el("table", {}, el("thead", {}, el("tr", {}, ...["Measures", "Fit", "Scale", "Pages", "Time"].map((h) => el("th", {}, h)))));
+        const table = el("table", {}, el("thead", {}, el("tr", {}, ...["Measures", "Fit", "Scale", "Pages", "Stamp (every page)", "Native composer dup?", "Time"].map((h) => el("th", {}, h)))));
         const tbody = el("tbody");
         table.append(tbody);
         for (const r of rows) {
-          tbody.append(el("tr", {}, el("td", {}, r.n), el("td", { class: r.fit === "one-page" ? "" : "warn" }, fitText(r.fit)), el("td", {}, `${r.scale}%`), el("td", {}, r.pageCount), el("td", {}, `${r.ms} ms`)));
-          report.push(`[INFO] synthetic ${r.n} measures: fit=${r.fit}, scale=${r.scale}, pages=${r.pageCount}, ${r.ms} ms`);
+          tbody.append(el("tr", {},
+            el("td", {}, r.n),
+            el("td", { class: r.fit === "one-page" ? "" : "warn" }, fitText(r.fit)),
+            el("td", {}, `${r.scale}%`),
+            el("td", {}, r.pageCount),
+            el("td", {}, badge(r.stampedOnEveryPage ? "PASS" : "FAIL")),
+            el("td", {}, badge(r.nativeComposerMatches === 0 ? "PASS (no dup)" : "NOTE")),
+            el("td", {}, `${r.ms} ms`)));
+          report.push(`[${r.stampedOnEveryPage ? "PASS" : "FAIL"}] synthetic ${r.n} measures: fit=${r.fit}, scale=${r.scale}, pages=${r.pageCount}, stampedEveryPage=${r.stampedOnEveryPage}, nativeComposerMatches=${r.nativeComposerMatches}, ${r.ms} ms`);
         }
         synthEl.append(table);
         if (withGallery) {

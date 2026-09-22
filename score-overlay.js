@@ -1,16 +1,31 @@
 // score-overlay.js
 //
 // Draws composer and rights/copyright text directly onto a rendered
-// score page's SVG. Exists because the pinned Verovio build this app
-// loads (5.2.0 — see verovio-engine.js) doesn't reliably convert
-// MusicXML's composer credit into its own "auto" header: Verovio's
-// changelog lists "Fix pgHead conversion in MusicXML importer" landing
-// in 5.6.0, after the version pinned here. Rather than keep fighting
-// the MusicXML encoding to work around an importer bug on an old
-// build, this stamps the text onto the SVG Verovio already produced.
-// `footer` is set to "none" in verovio-engine.js so this module owns
-// the copyright line outright instead of racing Verovio's own
-// (also-unreliable) footer rendering.
+// score page's SVG. Originally written because the Verovio build this
+// app loaded at the time (5.2.0) didn't reliably convert MusicXML's
+// composer credit into its own "auto" header: Verovio's changelog
+// lists "Fix pgHead conversion in MusicXML importer" landing in 5.6.0,
+// after that version. `footer` is set to "none" in verovio-engine.js
+// so this module owns the copyright line outright instead of racing
+// Verovio's own (also-unreliable) footer rendering.
+//
+// verovio-engine.js now pins 6.3.0 (plan §7), well past the 5.6.0 fix,
+// so header:"auto" may draw its own composer line natively — which
+// would double up with stampScoreMetadata's composer text below.
+// Checked the toolkit's own option reference for a narrower header
+// value to suppress just that: there isn't one — "header" only takes
+// none/auto/encoded (book.verovio.org/toolkit-reference/
+// toolkit-options.html), so there's no built-in way to keep the title
+// but drop only the composer line. STILL OPEN, needs a live-browser
+// check (no network in this sandbox — plan §9 step 9): load a file
+// with a composer credit on 6.3.0 with header:"auto" and look at the
+// rendered page. If the composer only shows up once, this file is
+// fine as-is. If it's doubled, the fix belongs upstream of this
+// module — e.g. dropping the composer-bearing <credit> from the copy
+// of the MusicXML handed to Verovio's loadData (musicxml-fixups.js),
+// so Verovio never has the material to draw it from, while
+// currentMetadata here (parsed separately in extractScoreMetadata, per
+// main.js) is untouched and keeps stamping it exactly as it does now.
 //
 // IMPORTANT: call this AFTER the page's <svg> is attached to the live
 // document (main.js does this right after scoreArea.appendChild(pageEl),
@@ -278,4 +293,38 @@ export function stampScoreMetadata(svgElement, metadata, layout) {
     const usableWidth = width - (layout.marginLeftMm + layout.marginRightMm) * scaleX;
     shrinkToFit(rightsEl, usableWidth);
   }
+}
+
+/**
+ * Stamps the part name (e.g. "Flute") at the top-left of a part page,
+ * vertically matched to where stampScoreMetadata positions the composer
+ * credit (same titleBBox-derived centerY/fontSize math, mirrored to the
+ * left margin instead of the right). Call once per rendered page of a
+ * part — every page, not just the first, since a part name belongs on
+ * every physical page (plan §4.4, §5).
+ *
+ * @param {SVGElement|null} svgElement — must already be attached to the
+ *   live document, same requirement as stampScoreMetadata.
+ * @param {string|null} partName
+ * @param {{ marginTopMm: number, marginLeftMm: number }} layout
+ */
+export function stampPartName(svgElement, partName, layout) {
+  if (!svgElement || !partName) return;
+  const { width, height, scaleX, scaleY } = getPageGeometry(svgElement);
+  if (!width || !height) return;
+
+  const titleBBox = getTitleBBox(svgElement); // present on page 1 only
+  const fontSize = titleBBox ? titleBBox.height / 2 : 4 * scaleY;
+  const centerY = titleBBox
+    ? titleBBox.y + titleBBox.height
+    : layout.marginTopMm * scaleY * 0.7; // page 2+: no title block to key off
+
+  addText(svgElement, {
+    text: partName,
+    x: layout.marginLeftMm * scaleX,
+    y: centerY,
+    anchor: "start",
+    dominantBaseline: "central",
+    fontSize,
+  });
 }
