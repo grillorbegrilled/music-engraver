@@ -139,24 +139,50 @@ function renderViewing() {
 
 // -- part generation (plan §6.1, §6.4 step 10) -----------------------------
 
+// -- part-page stamping sandbox -------------------------------------------
+//
+// stampScoreMetadata/stampPartName both need the SVG connected to the live
+// document — getBBox/getCTM/getComputedTextLength only compute real layout
+// for connected elements (score-overlay.js's own header comment).
+//
+// The first version of this sandbox used a plain `div.innerHTML =
+// svgString` appended straight into `document.body`. That's what broke the
+// stamp: unlike part-renderer-test.html (a bare page with no other
+// stylesheet), this app loads styles.css, which sizes the on-screen
+// `.page svg` for the phone screen — and a bare `<div>` under
+// `document.body` is still inside that cascade, so the sandboxed SVG
+// picked up the same responsive sizing instead of its native mm-based
+// geometry. getPageGeometry()'s width/height came back wrong, throwing off
+// both stamps: font-size and position derive directly from it (too-big,
+// mispositioned part name; composer/rights sized/placed somewhere
+// invisible). A shadow root keeps styles.css out of this subtree
+// entirely — real layout still happens, nothing from the outer page's CSS
+// cascades in — which is the one thing this sandbox needs that the test
+// page's bare div never had to worry about. Parsing with DOMParser's XML
+// parser (not innerHTML's HTML/foreign-content parser) matches
+// part-renderer-test.html's `stampAndCheckPage()` exactly, which the user
+// confirmed renders correctly.
+const stampSandboxHost = document.createElement("div");
+stampSandboxHost.style.cssText = "position:absolute; left:-99999px; top:-99999px;";
+document.body.appendChild(stampSandboxHost);
+const stampSandbox = stampSandboxHost.attachShadow({ mode: "open" });
+
 /**
- * Attaches an SVG string to the live document just long enough for
- * stampScoreMetadata/stampPartName to measure real layout (both require
- * a connected element — see score-overlay.js), stamps it, and returns
- * the result serialized back to a string. Passed to renderPartsToSvg as
- * its `stampPage` hook (plan §4.4, §5).
+ * Attaches an SVG string to the live document (in the isolated shadow
+ * sandbox above) just long enough for stampScoreMetadata/stampPartName to
+ * measure real layout, stamps it, and returns the result serialized back
+ * to a string. Passed to renderPartsToSvg as its `stampPage` hook (plan
+ * §4.4, §5).
  */
 function stampPartPage(svgString, { part, pageNumber }) {
-  const sandbox = document.createElement("div");
-  sandbox.style.position = "absolute";
-  sandbox.style.left = "-99999px";
-  sandbox.style.top = "0";
-  sandbox.setAttribute("aria-hidden", "true");
-  sandbox.innerHTML = svgString;
-  document.body.appendChild(sandbox);
+  const doc = new DOMParser().parseFromString(svgString, "image/svg+xml");
+  const svgEl = doc.documentElement;
+  if (!svgEl || doc.getElementsByTagName("parsererror").length) {
+    console.warn(`Couldn't parse rendered SVG for part "${part.name}", page ${pageNumber} — left unstamped.`);
+    return svgString;
+  }
+  stampSandbox.appendChild(svgEl);
   try {
-    const svgEl = sandbox.querySelector("svg");
-    if (!svgEl) return svgString;
     stampScoreMetadata(svgEl, currentMetadata, {
       marginTopMm: PART_LAYOUT_MM.marginTopMm,
       marginRightMm: PART_LAYOUT_MM.marginRightMm,
@@ -170,7 +196,7 @@ function stampPartPage(svgString, { part, pageNumber }) {
     });
     return new XMLSerializer().serializeToString(svgEl);
   } finally {
-    sandbox.remove();
+    stampSandbox.removeChild(svgEl);
   }
 }
 
