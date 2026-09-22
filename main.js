@@ -145,44 +145,59 @@ function renderViewing() {
 // document — getBBox/getCTM/getComputedTextLength only compute real layout
 // for connected elements (score-overlay.js's own header comment).
 //
-// The first version of this sandbox used a plain `div.innerHTML =
-// svgString` appended straight into `document.body`. That's what broke the
-// stamp: unlike part-renderer-test.html (a bare page with no other
-// stylesheet), this app loads styles.css, which sizes the on-screen
-// `.page svg` for the phone screen — and a bare `<div>` under
-// `document.body` is still inside that cascade, so the sandboxed SVG
-// picked up the same responsive sizing instead of its native mm-based
-// geometry. getPageGeometry()'s width/height came back wrong, throwing off
-// both stamps: font-size and position derive directly from it (too-big,
-// mispositioned part name; composer/rights sized/placed somewhere
-// invisible). A shadow root keeps styles.css out of this subtree
-// entirely — real layout still happens, nothing from the outer page's CSS
-// cascades in — which is the one thing this sandbox needs that the test
-// page's bare div never had to worry about. Parsing with DOMParser's XML
-// parser (not innerHTML's HTML/foreign-content parser) matches
-// part-renderer-test.html's `stampAndCheckPage()` exactly, which the user
-// confirmed renders correctly.
-const stampSandboxHost = document.createElement("div");
-stampSandboxHost.style.cssText = "position:absolute; left:-99999px; top:-99999px;";
-document.body.appendChild(stampSandboxHost);
-const stampSandbox = stampSandboxHost.attachShadow({ mode: "open" });
-
-/**
- * Attaches an SVG string to the live document (in the isolated shadow
- * sandbox above) just long enough for stampScoreMetadata/stampPartName to
- * measure real layout, stamps it, and returns the result serialized back
- * to a string. Passed to renderPartsToSvg as its `stampPage` hook (plan
- * §4.4, §5).
- */
+// Two things went wrong with the last version of this sandbox, in order:
+//
+// 1. `div.innerHTML = svgString` appended straight into `document.body`
+//    (no `.page` class) sat inside this app's styles.css cascade in some
+//    unpredictable way — different CSS treatment than the `.page` divs
+//    real pages render in, so getPageGeometry()'s width/height came back
+//    off, and every font-size/position derived from it went with it
+//    (too-big, mispositioned part name; composer/rights landing somewhere
+//    off-page).
+// 2. The fix for that swapped to a shadow root + DOMParser's XML parser
+//    (matching part-renderer-test.html, a bare page with no other
+//    stylesheet, where the same stamp code measured correctly) — that
+//    made sizing *worse*, not better, and dropped parts from the picker
+//    entirely. Two likely culprits: shadow-isolating removed styles.css
+//    from the sandbox's `<svg>` entirely rather than matching real pages'
+//    context, so its rect came back at a different (larger, unconstrained)
+//    size than a `.page`-classed one does — the fallback math in
+//    stampScoreMetadata/stampPartName scales with that rect, so a bigger
+//    rect means a bigger (still-wrong) result either way. And
+//    `DOMParser(..., "image/svg+xml")` parses in *strict* XML mode: if
+//    Verovio's SVG uses `xlink:href` without also declaring
+//    `xmlns:xlink` on the root (plausible — prepareStandaloneSvgString()
+//    below adds that namespace explicitly before cloning for PDF export,
+//    which only makes sense if the original element needs it), that's a
+//    well-formedness error under strict XML parsing and DOMParser returns
+//    a `<parsererror>` document instead of throwing — silently failing
+//    every part, which is exactly "picker only shows Full Score."
+//    innerHTML's HTML parser tolerates this (it has a built-in fixup for
+//    known prefixed attributes like xlink:href regardless of whether
+//    xmlns:xlink was declared), which is why score pages — inserted the
+//    same innerHTML way — never showed this problem.
+//
+// Fix: back to innerHTML (proven — it's exactly how renderAllPages()
+// already inserts every score page), but give the sandbox the same
+// `page` class real pages render in, as a real (offscreen) child of
+// #score-area, so any styles.css rule scoped to `.page`/`#score-area
+// .page` treats it identically to a real page instead of guessing at
+// what, if anything, needs to be matched or isolated.
 function stampPartPage(svgString, { part, pageNumber }) {
-  const doc = new DOMParser().parseFromString(svgString, "image/svg+xml");
-  const svgEl = doc.documentElement;
-  if (!svgEl || doc.getElementsByTagName("parsererror").length) {
-    console.warn(`Couldn't parse rendered SVG for part "${part.name}", page ${pageNumber} — left unstamped.`);
-    return svgString;
-  }
-  stampSandbox.appendChild(svgEl);
+  const sandbox = document.createElement("div");
+  sandbox.className = "page";
+  sandbox.style.position = "absolute";
+  sandbox.style.left = "-99999px";
+  sandbox.style.top = "0";
+  sandbox.setAttribute("aria-hidden", "true");
+  sandbox.innerHTML = svgString;
+  scoreArea.appendChild(sandbox);
   try {
+    const svgEl = sandbox.querySelector("svg");
+    if (!svgEl) {
+      console.warn(`Couldn't find rendered <svg> for part "${part.name}", page ${pageNumber} — left unstamped.`);
+      return svgString;
+    }
     stampScoreMetadata(svgEl, currentMetadata, {
       marginTopMm: PART_LAYOUT_MM.marginTopMm,
       marginRightMm: PART_LAYOUT_MM.marginRightMm,
@@ -196,7 +211,7 @@ function stampPartPage(svgString, { part, pageNumber }) {
     });
     return new XMLSerializer().serializeToString(svgEl);
   } finally {
-    stampSandbox.removeChild(svgEl);
+    sandbox.remove();
   }
 }
 
