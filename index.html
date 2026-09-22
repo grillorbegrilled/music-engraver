@@ -21,6 +21,12 @@
           Open MusicXML
           <input type="file" id="file-input" accept=".xml,.musicxml" hidden />
         </label>
+        <div class="control-group" style="display:flex; align-items:center; gap:6px;">
+          <label for="viewing-select">Viewing</label>
+          <select id="viewing-select" disabled>
+            <option value="score">Full Score</option>
+          </select>
+        </div>
         <button id="export-pdf-btn" class="button" disabled>Export PDF</button>
       </div>
     </header>

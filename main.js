@@ -1,12 +1,15 @@
 // main.js
 import { loadScore, updateSettings, renderPage, PAGE_SIZE_MM } from "./verovio-engine.js";
-import { extractScoreMetadata } from "./musicxml-fixups.js";
-import { stampScoreMetadata, getPageGeometry } from "./score-overlay.js";
+import { extractScoreMetadata, preprocessMusicXml } from "./musicxml-fixups.js";
+import { stampScoreMetadata, stampPartName, getPageGeometry } from "./score-overlay.js";
+import { extractParts } from "./part-extraction.js";
+import { renderPartsToSvg, PART_LAYOUT_MM } from "./part-renderer.js";
 
 // -- element references ----------------------------------------------------
 
 const fileInput = document.getElementById("file-input");
 const exportPdfBtn = document.getElementById("export-pdf-btn");
+const viewingSelect = document.getElementById("viewing-select");
 const scoreArea = document.getElementById("score-area");
 const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error");
@@ -27,6 +30,13 @@ let loadedFileName = "score";
 // Composer/rights text pulled from the file at load time and stamped
 // onto page 1's SVG by renderAllPages() — see score-overlay.js.
 let currentMetadata = { composer: null, arranger: null, rights: null };
+
+// Plan §6.2 state — parts are generated eagerly right after the score
+// loads (§6.1), cached here, and read (never re-rendered) by both the
+// review picker and exportPdf().
+let currentFixedXmlText = null; // preprocessMusicXml() output, reused for extractParts()
+let currentParts = []; // [{ id, name, pages: [svg, …], pageCount, scale, fit }, …]
+let viewing = { kind: "score" }; // or { kind: "part", index: N }
 
 function currentSettings() {
   return {
@@ -95,6 +105,148 @@ function renderAllPages(pageCount) {
   }
 }
 
+/**
+ * Displays one already-rendered, already-stamped part's cached pages.
+ * No Verovio work here — that all happened in generateParts(); this
+ * just swaps what scoreArea shows (plan §6.3: "no re-render, just
+ * display").
+ */
+function renderPartPages(part) {
+  scoreArea.innerHTML = "";
+  part.pages.forEach((svgMarkup) => {
+    const pageEl = document.createElement("div");
+    pageEl.className = "page";
+    pageEl.innerHTML = svgMarkup;
+    scoreArea.appendChild(pageEl);
+  });
+}
+
+/** Redraws scoreArea from whatever `viewing` currently points at. */
+function renderViewing() {
+  if (viewing.kind === "part") {
+    const part = currentParts[viewing.index];
+    if (part) {
+      renderPartPages(part);
+      return;
+    }
+    // Part index no longer valid (e.g. a reload wiped currentParts) —
+    // fall back to the score rather than showing a stale/empty area.
+    viewing = { kind: "score" };
+    viewingSelect.value = "score";
+  }
+  renderAllPages(totalPages);
+}
+
+// -- part generation (plan §6.1, §6.4 step 10) -----------------------------
+
+/**
+ * Attaches an SVG string to the live document just long enough for
+ * stampScoreMetadata/stampPartName to measure real layout (both require
+ * a connected element — see score-overlay.js), stamps it, and returns
+ * the result serialized back to a string. Passed to renderPartsToSvg as
+ * its `stampPage` hook (plan §4.4, §5).
+ */
+function stampPartPage(svgString, { part, pageNumber }) {
+  const sandbox = document.createElement("div");
+  sandbox.style.position = "absolute";
+  sandbox.style.left = "-99999px";
+  sandbox.style.top = "0";
+  sandbox.setAttribute("aria-hidden", "true");
+  sandbox.innerHTML = svgString;
+  document.body.appendChild(sandbox);
+  try {
+    const svgEl = sandbox.querySelector("svg");
+    if (!svgEl) return svgString;
+    stampScoreMetadata(svgEl, currentMetadata, {
+      marginTopMm: PART_LAYOUT_MM.marginTopMm,
+      marginRightMm: PART_LAYOUT_MM.marginRightMm,
+      marginBottomMm: PART_LAYOUT_MM.marginBottomMm,
+      marginLeftMm: PART_LAYOUT_MM.marginLeftMm,
+      isFirstPage: pageNumber === 1,
+    });
+    stampPartName(svgEl, part.name, {
+      marginTopMm: PART_LAYOUT_MM.marginTopMm,
+      marginLeftMm: PART_LAYOUT_MM.marginLeftMm,
+    });
+    return new XMLSerializer().serializeToString(svgEl);
+  } finally {
+    sandbox.remove();
+  }
+}
+
+/** Rebuilds the "Viewing:" selector — Full Score plus one entry per part, in `<part-list>` order (plan §6.3). */
+function populateViewingSelect(parts) {
+  viewingSelect.innerHTML = "";
+  const scoreOpt = document.createElement("option");
+  scoreOpt.value = "score";
+  scoreOpt.textContent = "Full Score";
+  viewingSelect.appendChild(scoreOpt);
+  parts.forEach((part, i) => {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = part.name;
+    viewingSelect.appendChild(opt);
+  });
+  viewingSelect.disabled = false;
+  viewingSelect.value = "score";
+}
+
+/**
+ * Eager part generation (plan §6.1): runs right after the score itself
+ * is loaded and displayed, so the user can review every part before
+ * ever hitting Export PDF. Never blocks or breaks the already-shown
+ * score — a failure here is logged and leaves the picker at "Full
+ * Score only" rather than surfacing as a page-level error.
+ */
+async function generateParts(fixedXmlText) {
+  currentParts = [];
+  viewingSelect.innerHTML = "";
+  const preparingOpt = document.createElement("option");
+  preparingOpt.textContent = "Preparing parts…";
+  viewingSelect.appendChild(preparingOpt);
+  viewingSelect.disabled = true;
+
+  try {
+    const parts = extractParts(fixedXmlText);
+    if (parts.length === 0) {
+      populateViewingSelect([]);
+      return;
+    }
+
+    const rendered = await renderPartsToSvg(parts, {
+      onProgress: (done, total, name) => {
+        setStatus(`Preparing parts… (${done + 1} of ${total}: ${name})`);
+      },
+      stampPage: stampPartPage,
+    });
+
+    currentParts = rendered;
+    populateViewingSelect(currentParts);
+    const partCount = currentParts.length;
+    setStatus(
+      `${loadedFileName} — ${totalPages} page${totalPages === 1 ? "" : "s"}, ` +
+        `${partCount} part${partCount === 1 ? "" : "s"} ready`
+    );
+  } catch (err) {
+    console.error("Part generation failed:", err);
+    populateViewingSelect([]);
+    setStatus(
+      `${loadedFileName} — ${totalPages} page${totalPages === 1 ? "" : "s"} ` +
+        `(parts unavailable: ${err?.message || err})`
+    );
+  }
+}
+
+viewingSelect.addEventListener("change", () => {
+  const value = viewingSelect.value;
+  if (value === "score") {
+    viewing = { kind: "score" };
+  } else {
+    viewing = { kind: "part", index: Number(value) };
+  }
+  renderViewing();
+});
+
 // -- file handling ----------------------------------------------------
 
 function readFileAsText(file) {
@@ -120,16 +272,27 @@ async function handleFile(file) {
   setStatus(`Engraving “${file.name}”…`);
   try {
     const text = await readFileAsText(file);
+    currentFixedXmlText = preprocessMusicXml(text); // NEW — reused by extractParts()
     currentMetadata = extractScoreMetadata(text);
     totalPages = await loadScore(text, currentSettings());
+    // loadScore() re-fixes internally too — harmless no-op per
+    // preprocessMusicXml's own idempotency guarantee (plan §6.2).
+    viewing = { kind: "score" }; // NEW — reset the picker on every new file
     renderAllPages(totalPages);
     scoreIsLoaded = true;
     loadedFileName = file.name.replace(/\.[^/.]+$/, "");
     exportPdfBtn.disabled = false;
     setStatus(`${file.name} — ${totalPages} page${totalPages === 1 ? "" : "s"}`);
+
+    // NEW — eager part generation (plan §6.1). Score is already
+    // displayed above; this runs after, so it never delays first paint.
+    await generateParts(currentFixedXmlText);
   } catch (err) {
     scoreIsLoaded = false;
     exportPdfBtn.disabled = true;
+    currentParts = [];
+    populateViewingSelect([]);
+    viewingSelect.disabled = true;
     showError(err, "Something went wrong while engraving this file:");
     setStatus("");
   }
@@ -319,7 +482,10 @@ const applySettingsChange = debounce(async () => {
   try {
     const settings = currentSettings();
     totalPages = updateSettings(settings);
-    renderAllPages(totalPages);
+    // Parts use their own fixed landscape-Letter layout (PART_LAYOUT_MM),
+    // not the sidebar controls, so only re-render if the score itself is
+    // what's currently on screen.
+    if (viewing.kind === "score") renderAllPages(totalPages);
     setStatus(`${totalPages} page${totalPages === 1 ? "" : "s"}`);
   } catch (err) {
     showError(err, "Couldn't apply that setting:");
