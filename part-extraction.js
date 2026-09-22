@@ -220,7 +220,9 @@ function buildSinglePartDocument(sourceDoc, scorePart, part) {
       if (child === part) newRoot.appendChild(partDoc.importNode(child, true));
     } else if (child.tagName === "part-list") {
       const reducedList = partDoc.importNode(child, false);
-      reducedList.appendChild(partDoc.importNode(scorePart, true));
+      const scorePartClone = partDoc.importNode(scorePart, true);
+      suppressStaffLabel(scorePartClone);
+      reducedList.appendChild(scorePartClone);
       newRoot.appendChild(reducedList);
     } else {
       newRoot.appendChild(partDoc.importNode(child, true));
@@ -228,6 +230,32 @@ function buildSinglePartDocument(sourceDoc, scorePart, part) {
   }
 
   return partDoc;
+}
+
+/**
+ * Suppresses the staff-left instrument label Verovio draws from
+ * <part-name> (system 1) / <part-abbreviation> (system 2+) — wanted for
+ * the full score, but redundant on an extracted part, which already
+ * gets its name from stampPartName() (score-overlay.js) once per page
+ * instead of once per system.
+ *
+ * Sets print-object="no" per the MusicXML spec (part-name's own
+ * attribute table: "Specifies whether or not to print an object. It is
+ * yes if not specified" — the standard, non-destructive way to keep the
+ * name as data while hiding it on the page), rather than blanking the
+ * text, so anything else that reads part-name for its text (instrument
+ * matching, the part-list itself) is unaffected.
+ *
+ * Mutates `scorePartClone` in place — call on the CLONE bound for
+ * Verovio, never on the original `scorePart` node, which
+ * partDisplayName() (and the full score's own unmodified render) still
+ * needs untouched.
+ */
+function suppressStaffLabel(scorePartClone) {
+  for (const tag of ["part-name", "part-abbreviation"]) {
+    const el = childElements(scorePartClone, tag)[0];
+    if (el) el.setAttribute("print-object", "no");
+  }
 }
 
 /**
