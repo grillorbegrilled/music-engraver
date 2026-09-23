@@ -228,6 +228,33 @@ export async function loadScore(musicXmlText, settings) {
   return pageCount;
 }
 
+// Serif font stack for all generated SVG text — matches the stack
+// score-overlay.js already uses for its stamped title/composer/credit
+// text, so overlay text and Verovio-drawn text (titles, dynamics,
+// tempo, lyrics, rehearsal marks, etc.) look consistent. `!important`
+// because Verovio's own SVG output carries its own font-family via a
+// mix of embedded <style> rules and per-element attributes at varying
+// specificity — the only way to guarantee every <text> ends up serif
+// is to outrank all of it, rather than assume which one wins.
+const SERIF_FONT_STACK = '"Times New Roman", Georgia, serif';
+
+/**
+ * Injects a font-family override as the first child of the SVG root so
+ * every <text> Verovio draws renders serif. Called on every raw SVG
+ * string this app produces (full-score preview here, and part pages in
+ * part-renderer.js) so the override lands regardless of which toolkit
+ * instance rendered it.
+ *
+ * @param {string} svgMarkup - raw SVG string from tk.renderToSVG()
+ * @returns {string}
+ */
+export function forceSerifFont(svgMarkup) {
+  return svgMarkup.replace(
+    /<svg[^>]*>/,
+    (openTag) => `${openTag}<style>text{font-family:${SERIF_FONT_STACK} !important;}</style>`
+  );
+}
+
 /** Re-applies settings and re-runs layout on the already-loaded score. */
 export function updateSettings(settings) {
   if (!toolkit) throw new Error("No score is loaded yet.");
@@ -239,5 +266,5 @@ export function updateSettings(settings) {
 /** Renders a single 1-indexed page to an SVG string. */
 export function renderPage(pageNumber) {
   if (!toolkit) throw new Error("No score is loaded yet.");
-  return toolkit.renderToSVG(pageNumber);
+  return forceSerifFont(toolkit.renderToSVG(pageNumber));
 }

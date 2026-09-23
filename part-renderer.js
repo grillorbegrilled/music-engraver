@@ -23,6 +23,7 @@ import {
   PAGE_SIZE_MM,
   buildSharedVerovioOptions,
   createToolkitInstance,
+  forceSerifFont,
 } from "./verovio-engine.js";
 
 // Parts are ALWAYS landscape Letter — this does not follow the main
@@ -177,7 +178,7 @@ export function fitPartToPages(tk, partXmlText) {
     throw new Error("The part loaded, but no pages of music were produced.");
   }
   const pages = [];
-  for (let p = 1; p <= pageCount; p++) pages.push(tk.renderToSVG(p));
+  for (let p = 1; p <= pageCount; p++) pages.push(forceSerifFont(tk.renderToSVG(p)));
   return { pages: restoreMultiRestRehearsals(pages, partXmlText), pageCount, scale, fit };
 }
 
