@@ -8,6 +8,7 @@ import { renderPartsToSvg, PART_LAYOUT_MM } from "./part-renderer.js";
 // -- element references ----------------------------------------------------
 
 const fileInput = document.getElementById("file-input");
+const exportScopeEl = document.getElementById("export-scope");
 const exportPdfBtn = document.getElementById("export-pdf-btn");
 const viewingSelect = document.getElementById("viewing-select");
 const scoreArea = document.getElementById("score-area");
@@ -183,21 +184,32 @@ function renderViewing() {
 // #score-area, so any styles.css rule scoped to `.page`/`#score-area
 // .page` treats it identically to a real page instead of guessing at
 // what, if anything, needs to be matched or isolated.
-function stampPartPage(svgString, { part, pageNumber }) {
+// Mounts an SVG string as a real, offscreen `.page`-classed child of
+// #score-area — same CSS context real pages get, minus visibility — and
+// returns the connected <svg> element plus a cleanup function. Shared by
+// stampPartPage() (needs live layout to stamp) and exportPdf() (needs live
+// layout to rasterize both score and part pages regardless of which one,
+// if either, is currently on screen).
+function mountSandboxPage(svgMarkup) {
   const sandbox = document.createElement("div");
   sandbox.className = "page";
   sandbox.style.position = "absolute";
   sandbox.style.left = "-99999px";
   sandbox.style.top = "0";
   sandbox.setAttribute("aria-hidden", "true");
-  sandbox.innerHTML = svgString;
+  sandbox.innerHTML = svgMarkup;
   scoreArea.appendChild(sandbox);
+  return { svgEl: sandbox.querySelector("svg"), remove: () => sandbox.remove() };
+}
+
+function stampPartPage(svgString, { part, pageNumber }) {
+  const { svgEl, remove } = mountSandboxPage(svgString);
+  if (!svgEl) {
+    console.warn(`Couldn't find rendered <svg> for part "${part.name}", page ${pageNumber} — left unstamped.`);
+    remove();
+    return svgString;
+  }
   try {
-    const svgEl = sandbox.querySelector("svg");
-    if (!svgEl) {
-      console.warn(`Couldn't find rendered <svg> for part "${part.name}", page ${pageNumber} — left unstamped.`);
-      return svgString;
-    }
     stampScoreMetadata(svgEl, currentMetadata, {
       marginTopMm: PART_LAYOUT_MM.marginTopMm,
       marginRightMm: PART_LAYOUT_MM.marginRightMm,
@@ -211,7 +223,7 @@ function stampPartPage(svgString, { part, pageNumber }) {
     });
     return new XMLSerializer().serializeToString(svgEl);
   } finally {
-    sandbox.remove();
+    remove();
   }
 }
 
@@ -407,81 +419,154 @@ function renderSvgToCanvas(svgElement, canvas, widthPx, heightPx) {
   });
 }
 
-// -- PDF Export Handler (Fixed 1:1 Page Mapping) --------------------------
+// -- PDF Export Handler -----------------------------------------------------
+
+function scorePageFormat(settings) {
+  let widthMm = PAGE_SIZE_MM.width;
+  let heightMm = PAGE_SIZE_MM.height;
+  if (settings.orientation === "landscape") [widthMm, heightMm] = [heightMm, widthMm];
+  return { widthMm, heightMm, orientation: settings.orientation };
+}
+
+function partPageFormat() {
+  // Parts are always landscape at their own fixed page size (§4.2) —
+  // never the sidebar's orientation setting.
+  return { widthMm: PART_LAYOUT_MM.widthMm, heightMm: PART_LAYOUT_MM.heightMm, orientation: "landscape" };
+}
+
+/**
+ * Builds the ordered list of pages exportPdf() will rasterize, one job per
+ * PDF page: { format: {widthMm, heightMm, orientation}, mount: () => {svgEl, remove} }.
+ * `mount` is deferred (not called here) so exportPdf() can mount, rasterize,
+ * and unmount one page at a time instead of holding every page's SVG in the
+ * DOM at once.
+ *
+ * scope "current": whatever's on screen right now — unchanged from before,
+ * except the page *format* now correctly follows what's actually showing
+ * (a part's fixed landscape layout, if that's what's displayed, rather than
+ * always assuming the score's own orientation setting — that mismatch was
+ * latent before parts existed to expose it).
+ *
+ * scope "scoreAndParts" (plan §6.4): the score's own pages, freshly
+ * rendered + stamped exactly as renderAllPages() does (so this works
+ * whether or not the score is what's currently displayed), followed by
+ * every part's already-rendered, already-stamped pages from currentParts —
+ * one combined PDF, one save().
+ */
+function buildExportJobs(scope, settings) {
+  const scoreFormat = scorePageFormat(settings);
+  const partFormat = partPageFormat();
+
+  if (scope === "scoreAndParts") {
+    const jobs = [];
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber++) {
+      jobs.push({
+        format: scoreFormat,
+        mount: () => {
+          const mounted = mountSandboxPage(renderPage(pageNumber));
+          if (mounted.svgEl) {
+            stampScoreMetadata(mounted.svgEl, currentMetadata, {
+              marginTopMm: settings.marginTopMm,
+              marginRightMm: settings.marginRightMm,
+              marginBottomMm: settings.marginBottomMm,
+              marginLeftMm: settings.marginLeftMm,
+              isFirstPage: pageNumber === 1,
+            });
+          }
+          return mounted;
+        },
+      });
+    }
+    currentParts.forEach((part) => {
+      part.pages.forEach((svgMarkup) => {
+        // Already stamped in generateParts() — just mount to rasterize.
+        jobs.push({ format: partFormat, mount: () => mountSandboxPage(svgMarkup) });
+      });
+    });
+    return jobs;
+  }
+
+  // scope === "current"
+  const format = viewing.kind === "part" ? partFormat : scoreFormat;
+  const svgElements = Array.from(scoreArea.querySelectorAll(".page svg"));
+  return svgElements.map((svgEl) => ({ format, mount: () => ({ svgEl, remove: null }) }));
+}
+
+function exportFileName(scope) {
+  if (scope === "scoreAndParts") return `${loadedFileName} - Score and Parts.pdf`;
+  if (viewing.kind === "part") {
+    const part = currentParts[viewing.index];
+    if (part) return `${loadedFileName} - ${part.name}.pdf`;
+  }
+  return `${loadedFileName}.pdf`;
+}
 
 async function exportPdf() {
   if (!scoreIsLoaded || totalPages < 1) return;
 
+  const scope = exportScopeEl.value; // "current" | "scoreAndParts"
   setStatus("Generating PDF…");
   exportPdfBtn.disabled = true;
 
   const sharedCanvas = document.createElement("canvas");
 
   try {
-    const settings = currentSettings();
-    let widthMm = PAGE_SIZE_MM.width;
-    let heightMm = PAGE_SIZE_MM.height;
-
-    if (settings.orientation === "landscape") {
-      [widthMm, heightMm] = [heightMm, widthMm];
-    }
-
     if (typeof window.jspdf?.jsPDF !== "function") {
       throw new Error("jsPDF library is not loaded.");
     }
 
-    // Target ONLY direct page containers to avoid capturing hidden defs/font SVGs
-    const pageContainers = scoreArea.querySelectorAll(".page");
-    const validSvgElements = [];
-
-    pageContainers.forEach((pageEl) => {
-      const svg = pageEl.querySelector("svg");
-      if (svg) validSvgElements.push(svg);
-    });
-
-    if (validSvgElements.length === 0) {
-      throw new Error("No rendered score pages found.");
+    const settings = currentSettings();
+    const jobs = buildExportJobs(scope, settings);
+    if (jobs.length === 0) {
+      throw new Error("No rendered pages found to export.");
     }
 
-    // Set resolution (2x resolution ~200 DPI)
-    const scaleFactor = 2;
-    const canvasWidthPx = Math.round((widthMm * 96) / 25.4) * scaleFactor;
-    const canvasHeightPx = Math.round((heightMm * 96) / 25.4) * scaleFactor;
-
-    sharedCanvas.width = canvasWidthPx;
-    sharedCanvas.height = canvasHeightPx;
-
     const { jsPDF } = window.jspdf;
-    
-    // Initialize jsPDF — starts with 1 blank page automatically
+    const firstFormat = jobs[0].format;
     const pdf = new jsPDF({
-      orientation: settings.orientation,
+      orientation: firstFormat.orientation,
       unit: "mm",
-      format: [widthMm, heightMm],
+      format: [firstFormat.widthMm, firstFormat.heightMm],
       compress: true,
     });
 
-    for (let i = 0; i < validSvgElements.length; i++) {
-      const pageIndex = i + 1;
+    // 2x resolution (~200 DPI); resized per job only when the format
+    // actually changes (e.g. the score→parts transition in "scoreAndParts"),
+    // not on every single page.
+    const scaleFactor = 2;
+    let canvasFormatKey = null;
 
-      // Add a new page ONLY after page 1
+    for (let i = 0; i < jobs.length; i++) {
+      const job = jobs[i];
+
       if (i > 0) {
-        pdf.addPage([widthMm, heightMm], settings.orientation);
+        pdf.addPage([job.format.widthMm, job.format.heightMm], job.format.orientation);
       }
 
-      setStatus(`Processing page ${pageIndex} of ${validSvgElements.length}…`);
+      setStatus(`Processing page ${i + 1} of ${jobs.length}…`);
       await yieldToMainThread();
 
-      const svgElement = validSvgElements[i];
+      const { svgEl, remove } = job.mount();
+      try {
+        if (!svgEl) continue; // shouldn't happen; skip rather than abort the whole export
 
-      // Paint SVG onto shared canvas
-      await renderSvgToCanvas(svgElement, sharedCanvas, canvasWidthPx, canvasHeightPx);
+        const canvasWidthPx = Math.round((job.format.widthMm * 96) / 25.4) * scaleFactor;
+        const canvasHeightPx = Math.round((job.format.heightMm * 96) / 25.4) * scaleFactor;
+        const formatKey = `${canvasWidthPx}x${canvasHeightPx}`;
+        if (formatKey !== canvasFormatKey) {
+          sharedCanvas.width = canvasWidthPx;
+          sharedCanvas.height = canvasHeightPx;
+          canvasFormatKey = formatKey;
+        }
 
-      const imgData = sharedCanvas.toDataURL("image/jpeg", 0.92);
+        await renderSvgToCanvas(svgEl, sharedCanvas, canvasWidthPx, canvasHeightPx);
+        const imgData = sharedCanvas.toDataURL("image/jpeg", 0.92);
 
-      // Explicitly set focus to current page index before adding image
-      pdf.setPage(pageIndex);
-      pdf.addImage(imgData, "JPEG", 0, 0, widthMm, heightMm, undefined, "FAST");
+        pdf.setPage(i + 1);
+        pdf.addImage(imgData, "JPEG", 0, 0, job.format.widthMm, job.format.heightMm, undefined, "FAST");
+      } finally {
+        if (remove) remove();
+      }
 
       await yieldToMainThread();
     }
@@ -489,8 +574,9 @@ async function exportPdf() {
     setStatus("Saving PDF file…");
     await yieldToMainThread();
 
-    pdf.save(`${loadedFileName}.pdf`);
-    setStatus(`${loadedFileName}.pdf downloaded successfully.`);
+    const fileName = exportFileName(scope);
+    pdf.save(fileName);
+    setStatus(`${fileName} downloaded successfully.`);
   } catch (err) {
     showError(err, "Failed to generate PDF:");
   } finally {
