@@ -18,7 +18,7 @@
 const FIXERS = [fixUnterminatedMeasureRepeats, fixNumeralRepeatDirections,
                fixZBuzzRollDirections, fixBassDrumNoteheads, fixCymbalNoteheads,
                fixAllRestMeasures, fixSoundOnlyNavigationMarks,
-               fixTempoChangeDirectionPlacement];
+               fixTempoChangeDirectionPlacement, fixSimultaneousVoiceStemDirections];
 
 /**
  * Runs every fixer in FIXERS over the given MusicXML text and returns
@@ -613,6 +613,115 @@ function fixCymbalNoteheads(doc) {
   }
 
   return fixes;
+}
+
+/**
+ * Two-voices-one-staff workaround: when a staff carries two voices at
+ * once in the same measure (e.g. the lower staff of a keyboard/organ
+ * part, written as an alto line in voice 2 against a bass line in
+ * voice 5) and neither voice's notes specify a <stem>, engraving
+ * convention is broken without explicit stem direction: the first
+ * (upper) voice should stem up, the second (lower) voice should stem
+ * down, so the two lines stay visually distinguishable instead of
+ * colliding or rendering with whatever default direction the pitch
+ * happens to produce.
+ *
+ * Fix: within each measure, group notes by staff (the <staff> text,
+ * or "_default" for single-staff parts that omit it — same
+ * convention fixUnterminatedMeasureRepeats uses). For any staff with
+ * two or more distinct voices in that measure, force <stem> on every
+ * non-rest note: the first voice encountered (document order) gets
+ * "up", every other voice on that staff gets "down". A staff with
+ * only one voice active in the measure is left alone — nothing to
+ * disambiguate.
+ *
+ * "Forced" means forced: an existing <stem> value is overwritten too,
+ * not just filled in when absent.
+ *
+ * Rests are skipped — a <rest> has no stem to direct. Chord notes
+ * (<chord/>) are treated as part of their voice like any other note,
+ * so every note sounding in a forced voice gets the same direction.
+ *
+ * @param {Document} doc
+ * @returns {number} number of notes whose stem was set or changed
+ */
+function fixSimultaneousVoiceStemDirections(doc) {
+  let fixes = 0;
+  const measures = Array.from(doc.getElementsByTagName("measure"));
+
+  for (const measure of measures) {
+    const notes = Array.from(measure.getElementsByTagName("note"));
+
+    // staffKey -> Map(voiceKey -> notes[]), voiceKey insertion order
+    // preserves first-appearance order within the measure.
+    const byStaff = new Map();
+
+    for (const note of notes) {
+      const voiceEl = Array.from(note.children).find((el) => el.tagName === "voice");
+      if (!voiceEl) continue; // no voice to group by — leave untouched
+
+      const staffEl = Array.from(note.children).find((el) => el.tagName === "staff");
+      const staffKey = staffEl ? staffEl.textContent.trim() : "_default";
+      const voiceKey = voiceEl.textContent.trim();
+
+      if (!byStaff.has(staffKey)) byStaff.set(staffKey, new Map());
+      const voices = byStaff.get(staffKey);
+      if (!voices.has(voiceKey)) voices.set(voiceKey, []);
+      voices.get(voiceKey).push(note);
+    }
+
+    for (const voices of byStaff.values()) {
+      if (voices.size < 2) continue; // single voice on this staff — nothing to force
+
+      let first = true;
+      for (const voiceNotes of voices.values()) {
+        const direction = first ? "up" : "down";
+        first = false;
+
+        for (const note of voiceNotes) {
+          if (isRestNote(note)) continue;
+          if (forceStemDirection(doc, note, direction)) fixes++;
+        }
+      }
+    }
+  }
+
+  return fixes;
+}
+
+/** True if `note` is a rest (has a <rest> child) — rests have no stem. */
+function isRestNote(note) {
+  return Array.from(note.children).some((el) => el.tagName === "rest");
+}
+
+/**
+ * Sets `note`'s <stem> to `direction` ("up" or "down"), overwriting
+ * any existing value. Reuses an existing <stem> element; otherwise
+ * creates one, positioned per MusicXML's content model — stem comes
+ * after type/dot/accidental/time-modification and before
+ * notehead/notehead-text/staff/beam/notations/lyric/play, so the new
+ * element is inserted right before whichever of those comes first.
+ *
+ * @returns {boolean} true if the note's stem value actually changed
+ */
+function forceStemDirection(doc, note, direction) {
+  let stem = Array.from(note.children).find((el) => el.tagName === "stem");
+  if (stem) {
+    if (stem.textContent === direction) return false;
+    stem.textContent = direction;
+    return true;
+  }
+
+  stem = doc.createElement("stem");
+  stem.textContent = direction;
+
+  const followingTags = new Set([
+    "notehead", "notehead-text", "staff", "beam", "notations", "lyric", "play",
+  ]);
+  const anchor = Array.from(note.children).find((el) => followingTags.has(el.tagName));
+  note.insertBefore(stem, anchor || null); // insertBefore(x, null) appends
+
+  return true;
 }
 
 /**
