@@ -154,7 +154,8 @@ export function buildSharedVerovioOptions(geometry) {
 }
 
 /**
- * Full-score options (one system per page).
+ * Full-score options (one system per page in landscape, up to two per
+ * page in portrait).
  *
  * @param {object} settings
  * @param {"portrait"|"landscape"} settings.orientation
@@ -183,15 +184,17 @@ export function buildVerovioOptions(settings) {
       spacingLinear: settings.spacingLinear,
       spacingNonLinear: settings.spacingNonLinear,
     }),
-    // Keep each page to one system. Verovio's automatic system layout will
-    // fit the system horizontally rather than truncating its staves.
-    systemMaxPerPage: 1,
+    // Landscape: one system per page. Portrait: up to two systems per page
+    // (Verovio still drops to one if two won't fit the page height).
+    // Verovio's automatic system layout will fit each system horizontally
+    // rather than truncating its staves.
+    systemMaxPerPage: settings.orientation === "portrait" ? 2 : 1,
     shrinkToFit: false,
     justifyVertically: false,
-    // systemMaxPerPage:1 means every system is "last on its page." Verovio
-    // only justifies a last system if its natural width already reaches
-    // minLastJustification (default 0.8 = 80%) of the page width. Force 0
-    // so every system stretches to fill the page regardless.
+    // The last system on a page is only justified if its natural width
+    // already reaches minLastJustification (default 0.8 = 80%) of the page
+    // width. Force 0 so every system stretches to fill the page regardless
+    // (with one system per page, every system is "last on its page").
     minLastJustification: 0,
   };
 }
