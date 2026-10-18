@@ -741,11 +741,18 @@ function forceStemDirection(doc, note, direction) {
  * measure-level rest, which is rendered centered in the measure rather
  * than as an ordinary whole-note rest.
  *
- * Only measures where EVERY <note> is a rest are changed. Measures
- * containing any pitched or unpitched note are left untouched.
+ * Single-voice, single-staff measures where EVERY <note> is a rest are
+ * collapsed into one note, as described above. Measures containing any
+ * pitched or unpitched note are left untouched.
+ *
+ * Multi-voice / multi-staff measures are handled per layer instead
+ * (see collapseRestOnlyLayers): any one (staff, voice) layer made up
+ * entirely of rests that spans the whole measure becomes its own
+ * whole-measure rest, in place, even when other layers of the same
+ * measure hold real notes (or are rest-only themselves).
  *
  * @param {Document} doc
- * @returns {number} number of measures converted
+ * @returns {number} number of measures (or layers) converted
  */
 function fixAllRestMeasures(doc) {
   let fixes = 0;
@@ -763,11 +770,17 @@ function fixAllRestMeasures(doc) {
       Array.from(note.children).some((el) => el.tagName === "rest")
     );
 
-    if (!allRests) continue;
+    if (!allRests) {
+      // Some other voice/staff has real notes, but a layer of its own
+      // may still be nothing but a measure's worth of rests.
+      fixes += collapseRestOnlyLayers(doc, measure);
+      continue;
+    }
 
     // Don't attempt to collapse a measure containing multiple voices
     // or staves into one note. Those can have independently timed
-    // rests and require separate measure-level rests.
+    // rests and require separate measure-level rests — handled one
+    // layer at a time.
     const voices = new Set();
     const staffs = new Set();
 
@@ -783,7 +796,10 @@ function fixAllRestMeasures(doc) {
       if (staff) staffs.add(staff.textContent.trim());
     }
 
-    if (voices.size > 1 || staffs.size > 1) continue;
+    if (voices.size > 1 || staffs.size > 1) {
+      fixes += collapseRestOnlyLayers(doc, measure);
+      continue;
+    }
 
     // The replacement note has to last as long as everything it
     // replaces, so total the durations of all the rests. (Copying the
@@ -822,37 +838,171 @@ function fixAllRestMeasures(doc) {
       measure.removeChild(note);
     }
 
-    const newNote = doc.createElement("note");
-
-    const rest = doc.createElement("rest");
-    rest.setAttribute("measure", "yes");
-    newNote.appendChild(rest);
-
-    const newDuration = doc.createElement("duration");
-    newDuration.textContent = String(totalDuration);
-    newNote.appendChild(newDuration);
-
-    if (voice) {
-      const newVoice = doc.createElement("voice");
-      newVoice.textContent = voice.textContent;
-      newNote.appendChild(newVoice);
-    }
-
-    const type = doc.createElement("type");
-    type.textContent = "whole";
-    newNote.appendChild(type);
-
-    if (staff) {
-      const newStaff = doc.createElement("staff");
-      newStaff.textContent = staff.textContent;
-      newNote.appendChild(newStaff);
-    }
+    const newNote = buildWholeMeasureRestNote(
+      doc,
+      totalDuration,
+      voice ? voice.textContent : null,
+      staff ? staff.textContent : null
+    );
 
     measure.appendChild(newNote);
     fixes++;
   }
 
   return fixes;
+}
+
+/**
+ * Builds the <note> that stands for a whole-measure rest:
+ * <rest measure="yes"/>, <duration>, optional <voice>, <type>whole,
+ * optional <staff> (MusicXML content-model order).
+ *
+ * @param {Document} doc
+ * @param {number|string} duration
+ * @param {string|null} voiceText
+ * @param {string|null} staffText
+ * @returns {Element}
+ */
+function buildWholeMeasureRestNote(doc, duration, voiceText, staffText) {
+  const newNote = doc.createElement("note");
+
+  const rest = doc.createElement("rest");
+  rest.setAttribute("measure", "yes");
+  newNote.appendChild(rest);
+
+  const newDuration = doc.createElement("duration");
+  newDuration.textContent = String(duration);
+  newNote.appendChild(newDuration);
+
+  if (voiceText !== null) {
+    const newVoice = doc.createElement("voice");
+    newVoice.textContent = voiceText;
+    newNote.appendChild(newVoice);
+  }
+
+  const type = doc.createElement("type");
+  type.textContent = "whole";
+  newNote.appendChild(type);
+
+  if (staffText !== null) {
+    const newStaff = doc.createElement("staff");
+    newStaff.textContent = staffText;
+    newNote.appendChild(newStaff);
+  }
+
+  return newNote;
+}
+
+/**
+ * Per-layer half of fixAllRestMeasures, for measures that hold more than
+ * one voice/staff (or a mix of rests and real notes), where collapsing
+ * the whole measure into one note isn't possible.
+ *
+ * A "layer" is every <note> sharing one (staff, voice) pair. A layer is
+ * collapsed into a single whole-measure rest only if ALL of these hold:
+ *   - every note in it is a plain, visible rest (no chord/grace/cue, no
+ *     print-object="no", so hidden spacer rests stay hidden),
+ *   - its notes are one contiguous run (nothing from another layer
+ *     between them, no <backup>/<forward> inside it),
+ *   - it starts at the very beginning of the measure and runs exactly
+ *     as long as the measure's longest layer — a partial rest (say a
+ *     lone half rest in a longer bar) is NOT a whole-measure rest.
+ *
+ * The replacement takes the place of the layer's first note and carries
+ * the layer's total duration, so the measure's <backup>/<forward>
+ * bookkeeping stays valid and no other layer is disturbed. If the
+ * measure's timeline can't be trusted (a <duration> that's missing or
+ * unparseable) nothing is changed.
+ *
+ * @param {Document} doc
+ * @param {Element} measure
+ * @returns {number} number of layers converted
+ */
+function collapseRestOnlyLayers(doc, measure) {
+  const childText = (el, tag) => {
+    const child = Array.from(el.children).find((c) => c.tagName === tag);
+    return child ? child.textContent : null;
+  };
+  const hasChild = (el, tag) => Array.from(el.children).some((c) => c.tagName === tag);
+  const toNumber = (text) => {
+    if (text === null || text.trim() === "") return NaN;
+    return Number(text.trim());
+  };
+
+  // Walk the measure once, tracking the timeline position (backup moves
+  // it back, forward moves it ahead) to learn where each layer starts
+  // and ends, and how long the measure is overall.
+  const layers = new Map();
+  let position = 0;
+  let measureEnd = 0;
+  let segment = 0; // bumps at every <backup>/<forward>
+  let lastStart = 0; // start of the previous note, for <chord/> notes
+  let noteIndex = -1;
+
+  for (const el of Array.from(measure.children)) {
+    if (el.tagName === "backup" || el.tagName === "forward") {
+      const amount = toNumber(childText(el, "duration"));
+      if (!Number.isFinite(amount)) return 0;
+      position += el.tagName === "backup" ? -amount : amount;
+      measureEnd = Math.max(measureEnd, position);
+      segment++;
+      continue;
+    }
+    if (el.tagName !== "note") continue;
+
+    noteIndex++;
+    const staffText = childText(el, "staff");
+    const voiceText = childText(el, "voice");
+    const key = `${staffText === null ? "1" : staffText.trim()}|${voiceText === null ? "" : voiceText.trim()}`;
+
+    let layer = layers.get(key);
+    if (!layer) {
+      layer = {
+        notes: [], eligible: true, start: null, end: 0,
+        segment, lastIndex: noteIndex - 1, voiceText, staffText,
+      };
+      layers.set(key, layer);
+    }
+    layer.notes.push(el);
+
+    const isChord = hasChild(el, "chord");
+    const isGrace = hasChild(el, "grace");
+    if (
+      !hasChild(el, "rest") || isChord || isGrace || hasChild(el, "cue") ||
+      el.getAttribute("print-object") === "no" ||
+      layer.segment !== segment || layer.lastIndex !== noteIndex - 1
+    ) {
+      layer.eligible = false;
+    }
+    layer.lastIndex = noteIndex;
+
+    if (isGrace) continue; // no duration, no time
+    const noteStart = isChord ? lastStart : position;
+    if (layer.start === null) layer.start = noteStart;
+    if (!isChord) {
+      const duration = toNumber(childText(el, "duration"));
+      if (!Number.isFinite(duration)) return 0;
+      lastStart = noteStart;
+      position += duration;
+      measureEnd = Math.max(measureEnd, position);
+    }
+    layer.end = Math.max(layer.end, position);
+  }
+
+  let converted = 0;
+  for (const layer of layers.values()) {
+    if (!layer.eligible) continue;
+    if (layer.start !== 0 || layer.end !== measureEnd || measureEnd <= 0) continue;
+
+    const replacement = buildWholeMeasureRestNote(
+      doc, layer.end - layer.start, layer.voiceText, layer.staffText
+    );
+    measure.insertBefore(replacement, layer.notes[0]);
+    for (const note of layer.notes) measure.removeChild(note);
+    converted++;
+  }
+
+  return converted;
 }
 
 /**
